@@ -28,7 +28,10 @@ export class OpenCodeProvider implements IAgentProvider {
   run(task: AgentTask, onEvent: (e: AgentEvent) => void): Promise<AgentResult> {
     const args = ['run', composePrompt(task), '--format', 'json'];
     if (task.model !== '') args.push('--model', task.model);
-    if (task.autoApprove) args.push('--auto');
+    // Owner decision: opencode always gets --auto. Its internal permission prompts
+    // can't be bridged to Telegram (nobody to answer them), so without --auto tasks
+    // hang until timeout. Safety comes from ALLOWED_ROOTS + whitelist + /cancel.
+    args.push('--auto');
     for (const img of task.images) args.push('--file', img);
 
     return runSpawn(
