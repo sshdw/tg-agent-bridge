@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { loadConfig } from './config.js';
 import type { Config } from './config.js';
@@ -15,17 +15,10 @@ import { OpenCodeProvider } from './providers/opencode.js';
 import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 import { startCiPoller } from './github/ciPoller.js';
+import { log } from './log.js';
 import { VERSION } from './version.js';
 
-export function log(line: string): void {
-  const out = `[${new Date().toISOString()}] ${line}\n`;
-  process.stdout.write(out);
-  try {
-    appendFileSync('bot.log', out);
-  } catch {
-    // logging must never crash the bot
-  }
-}
+export { log };
 
 /** Short SHA of the working tree, or 'unknown' outside a git checkout. */
 export function shortSha(): string {

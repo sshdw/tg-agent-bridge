@@ -2,7 +2,7 @@ import type { Config } from '../config.js';
 import type { Responder } from '../core/queue.js';
 import type { Store } from '../storage/db.js';
 import { GitHubClient, runStatus } from './client.js';
-import { log } from '../index.js';
+import { log } from '../log.js';
 
 /**
  * `/watch` background poller.
@@ -27,14 +27,18 @@ function emoji(status: string): string {
   return '🟡';
 }
 
-/** True when the transition between two statuses is worth a DM. */
-function isNoteworthy(prev: string, next: string): boolean {
+/** A run that is still working — seeing it start is never worth a DM. */
+const PENDING = new Set(['queued', 'in_progress', 'requested', 'waiting', 'pending']);
+
+/**
+ * True when the transition between two statuses is worth a DM: the newest run
+ * reached a finished verdict (green, red or grey). Progress states are skipped
+ * quietly — the owner cares about the verdict, not the start. Exported for the
+ * offline harness.
+ */
+export function isNoteworthy(prev: string, next: string): boolean {
   if (prev === next) return false;
-  if (next === 'queued' || next === 'in_progress' || next === 'requested' || next === 'waiting') {
-    // Don't ping on "started" — the owner cares about the verdict, not the start.
-    return prev !== '';
-  }
-  return true;
+  return !PENDING.has(next);
 }
 
 export function startCiPoller(cfg: Config, store: Store, io: Responder): void {
@@ -54,7 +58,7 @@ export function startCiPoller(cfg: Config, store: Store, io: Responder): void {
         if (!run) continue;
         const status = runStatus(run);
         if (!isNoteworthy(w.last_status, status)) continue;
-        store.updateCiWatchState(w.repo, status, run.id);
+        store.updateCiWatchState(w.chat_id, w.repo, status, run.id);
         reported.delete(`${w.chat_id}:${w.repo}`);
         const title = run.display_title === '' ? run.name : run.display_title;
         await io

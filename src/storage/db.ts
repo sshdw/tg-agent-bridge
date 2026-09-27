@@ -331,10 +331,17 @@ export class Store {
     return r.changes > 0;
   }
 
-  updateCiWatchState(repo: string, status: string, runId: number | null): void {
+  /**
+   * Record the newest observed run. Scoped to (chat_id, repo): two chats may
+   * watch the same repo (or one chat two branches of it) and must not share a
+   * baseline, or DMs get lost / duplicated across chats.
+   */
+  updateCiWatchState(chatId: number, repo: string, status: string, runId: number | null): void {
     this.db
-      .prepare('UPDATE ci_watch SET last_status = ?, last_run_id = ?, updated_at = ? WHERE repo = ?')
-      .run(status, runId, nowSec(), repo);
+      .prepare(
+        'UPDATE ci_watch SET last_status = ?, last_run_id = ?, updated_at = ? WHERE chat_id = ? AND repo = ?',
+      )
+      .run(status, runId, nowSec(), chatId, repo);
   }
 
   /** True when `status` is one of the terminal states the poller cares about. */

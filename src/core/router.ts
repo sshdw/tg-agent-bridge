@@ -16,6 +16,8 @@ import type { Responder } from '../core/queue.js';
 import { TaskQueue } from '../core/queue.js';
 import { getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
+// [WAVE2-GITHUB] §1.6 — handlers live in the github layer so Core stays a command table.
+import { handleCi, handleCommit, handlePr, handleWatch } from '../github/commands.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { MsgRow, Store } from '../storage/db.js';
 import { createStream, escapeHtml, saveInboundFile, sendLong } from '../telegram/stream.js';
@@ -35,6 +37,12 @@ export interface Deps {
   store: Store;
   queue: TaskQueue;
   io: Responder;
+  /**
+   * Optional live grammy Bot. `registerRouter` captures the bot it is handed and
+   * uses that; this field exists only so callers that already have a bot can pass
+   * one. `src/index.ts` deliberately leaves it unset.
+   */
+  bot?: Bot;
 }
 
 const arg = (text: string | undefined): string => (text ?? '').split(' ').slice(1).join(' ').trim();
@@ -142,6 +150,72 @@ function renderFind(store: Store, chatId: number, needle: string): string {
 
 // WAVE2/FILES-END
 
+// WAVE2/GITHUB-BEGIN — §1.6 handlers (subagent E). Every registration below is a
+// thin adapter: resolve the chat workdir, call the github layer, send the sentence.
+/**
+ * Resolve the chat's workdir, or return the one short reply to show when the
+ * project sits outside ALLOWED_ROOTS. Shared by /commit and /pr.
+ */
+function githubWorkdir(deps: Deps, chatId: number): string | null {
+  try {
+    return resolveWorkdir(deps.cfg, chatId, getOrCreate(deps.store, deps.cfg, chatId).project);
+  } catch {
+    return null;
+  }
+}
+
+/** Split "/pr  my title  here" into the whole argument string, spaces preserved. */
+const restArgs = (text: string | undefined): string => (text ?? '').split(' ').slice(1).join(' ');
+
+const DENIED = '🔒 Папка проекта вне разрешённых. Смотри ALLOWED_ROOTS в .env.';
+
+function registerGithubCommands(bot: Bot, deps: Deps): void {
+  bot.command('commit', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const workdir = githubWorkdir(deps, chatId);
+    if (workdir === null) return deps.io.notify(chatId, DENIED);
+    const message = restArgs(ctx.message?.text);
+    try {
+      return await deps.io.notify(chatId, await handleCommit(deps, workdir, message));
+    } catch {
+      return deps.io.notify(chatId, '❌ E_GIT_COMMIT: неожиданная ошибка git.');
+    }
+  });
+
+  bot.command('pr', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const workdir = githubWorkdir(deps, chatId);
+    if (workdir === null) return deps.io.notify(chatId, DENIED);
+    try {
+      return await deps.io.notify(chatId, await handlePr(deps, workdir, restArgs(ctx.message?.text)));
+    } catch {
+      return deps.io.notify(chatId, '❌ E_GH_HTTP: не удалось открыть PR.');
+    }
+  });
+
+  bot.command('ci', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const repo = arg(ctx.message?.text);
+    try {
+      return await deps.io.notify(chatId, await handleCi(deps, repo));
+    } catch {
+      return deps.io.notify(chatId, '❌ Не удалось получить статус CI.');
+    }
+  });
+
+  bot.command('watch', async (ctx) => {
+    const chatId = ctx.chat.id;
+    // First word is the slug, the rest is the optional branch.
+    const parts = arg(ctx.message?.text).split(' ').filter((w) => w !== '');
+    try {
+      return await deps.io.notify(chatId, await handleWatch(deps, chatId, parts[0] ?? '', parts[1] ?? ''));
+    } catch {
+      return deps.io.notify(chatId, '❌ Не удалось изменить наблюдение. Проверь формат owner/repo.');
+    }
+  });
+}
+// WAVE2/GITHUB-END
+
 function runClone(deps: Deps, chatId: number, url: string): Promise<void> {
   if (!/^https:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=-]+$/.test(url)) {
     return deps.io.notify(chatId, 'Использование: /clone <https-url>');
@@ -176,6 +250,10 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   // Inline-button callbacks share the same whitelist gate as messages.
   registerCallbacks(bot, deps);
 
+  // WAVE2/GITHUB-BEGIN — §1.6 /commit /pr /ci /watch (subagent E)
+  registerGithubCommands(bot, deps);
+  // WAVE2/GITHUB-END
+
   bot.command('start', (ctx) => {
     const chatId = ctx.chat.id;
     const s = getOrCreate(store, cfg, chatId);
@@ -188,7 +266,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
     );
   });
 
