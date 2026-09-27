@@ -76,14 +76,17 @@ export function listProjects(cfg: Config): string[] {
 const STALE = '⌛ Кнопка устарела. Отправь команду заново.';
 
 /**
- * The `/update` feature lives in `src/update/` (a later wave). Until it exists this
- * entry point is a clearly named seam the update subagent can replace; calling it now
- * answers "недоступно" instead of throwing.
+ * The `/update` flow lives in `src/core/update.ts`; this is the Telegram seam
+ * that runs it after the double-confirm buttons. The button router above
+ * already handled stage 1 ("обновить?") → stage 2 ("точно обновить?"), so by
+ * the time we get here the owner confirmed twice.
  */
 export async function runUpdateConfirm(ctx: Context, cfg: Config, _io: Responder, stage: 1 | 2): Promise<void> {
   void cfg;
+  void _io;
   void stage;
-  await ctx.reply('🔧 Обновление недоступно в этой сборке.');
+  const { confirmUpdate } = await import('../core/update.js');
+  await confirmUpdate({ reply: (text: string) => ctx.reply(text) });
 }
 
 /** Plan actions: delegate to the queue's state machine, never reimplement it. */

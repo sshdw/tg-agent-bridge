@@ -13,6 +13,8 @@ import {
   resolveOutboundFile,
 } from '../core/files.js';
 import type { Responder } from '../core/queue.js';
+import { COST_USAGE, formatCostReply, parseCostArg } from './cost.js';
+import { repoDir, versionHash } from './update.js';
 import { TaskQueue } from '../core/queue.js';
 import { runExec } from '../core/exec.js';
 import { CODE_USAGE, registerPlanFlow, requestCode, tryPlanRework } from '../core/plan.js';
@@ -33,6 +35,7 @@ import {
 } from '../telegram/callbacks.js';
 import { SCOPE } from '../telegram/keyboard.js';
 import { runSys } from './sys.js';
+import { updateConfirmKeyboard } from '../telegram/keyboard.js';
 import { clear } from '../telegram/nonce.js';
 import { transcribeVoice } from '../voice/index.js';
 
@@ -270,7 +273,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — план, запуск после одобрения\n/review • /test • /fix <симптом> — пресеты /code\n/exec <команда> — shell в папке проекта\n/sys — CPU/RAM/диск\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — план, запуск после одобрения\n/review • /test • /fix <симптом> — пресеты /code\n/exec <команда> — shell в папке проекта\n/sys — CPU/RAM/диск\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить\n/cost [day|week] — траты агента\n/update — обновить бота (двойное подтверждение)`,
     );
   });
 
@@ -400,6 +403,24 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     if (r === 'task') return; // fail() already messaged
     return deps.io.notify(chatId, 'Нечего отменять.');
   });
+
+  // WAVE2/COST-BEGIN
+  bot.command('cost', (ctx) => {
+    const period = parseCostArg(arg(ctx.message?.text));
+    if (period === null) return deps.io.notify(ctx.chat.id, COST_USAGE);
+    return deps.io.notify(ctx.chat.id, formatCostReply(store, ctx.chat.id, period));
+  });
+  // WAVE2/COST-END
+
+  // WAVE2/UPDATE-BEGIN
+  bot.command('update', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const before = await versionHash(repoDir());
+    await ctx.reply(`Текущая версия: ${before}\nОбновить из git и перезапуститься?`, {
+      reply_markup: updateConfirmKeyboard(chatId, 1),
+    });
+  });
+  // WAVE2/UPDATE-END
 
   // WAVE2/FILES-BEGIN — unified inbound: any file (photo/document/audio/video) lands
   // in <workdir>/inbox and is attached to the next task. One helper, so they cannot drift.
