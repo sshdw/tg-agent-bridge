@@ -230,6 +230,11 @@ export class Store {
     this.db.prepare('UPDATE tasks SET plan_text = ? WHERE id = ?').run(plan, id);
   }
 
+  /** Plan approve: restore the implementation prompt on a parked plan-turn row. */
+  setTaskPrompt(id: number, prompt: string): void {
+    this.db.prepare('UPDATE tasks SET prompt = ? WHERE id = ?').run(prompt, id);
+  }
+
   getTask(id: number): TaskRow | undefined {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
   }
