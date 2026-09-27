@@ -7,6 +7,7 @@ import { AGENT_IDS } from '../config.js';
 import { hasApproval, resolveApproval } from '../core/approvals.js';
 import type { Responder } from '../core/queue.js';
 import { COST_USAGE, formatCostReply, parseCostArg } from './cost.js';
+import { repoDir, versionHash } from './update.js';
 import { TaskQueue } from '../core/queue.js';
 import { getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
@@ -21,6 +22,7 @@ import {
   showProjectPicker,
 } from '../telegram/callbacks.js';
 import { SCOPE } from '../telegram/keyboard.js';
+import { updateConfirmKeyboard } from '../telegram/keyboard.js';
 import { clear } from '../telegram/nonce.js';
 import { transcribeVoice } from '../voice/index.js';
 
@@ -188,6 +190,16 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     return deps.io.notify(ctx.chat.id, formatCostReply(store, ctx.chat.id, period));
   });
   // WAVE2/COST-END
+
+  // WAVE2/UPDATE-BEGIN
+  bot.command('update', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const before = await versionHash(repoDir());
+    await ctx.reply(`Текущая версия: ${before}\nОбновить из git и перезапуститься?`, {
+      reply_markup: updateConfirmKeyboard(chatId, 1),
+    });
+  });
+  // WAVE2/UPDATE-END
 
   bot.on('message:photo', async (ctx) => {
     const chatId = ctx.chat.id;
