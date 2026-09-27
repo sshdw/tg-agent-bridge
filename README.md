@@ -40,6 +40,16 @@ npm run dev
 
 `better-sqlite3` — нативный модуль. Если переключаешься на другую мажорную версию Node, пересобери его: `npm rebuild better-sqlite3`.
 
+Для голосовых сообщений (VOICE IN) нужен локальный whisper.cpp — ставь по желанию, без него бот просто отвечает `E_VOICE_NOT_CONFIGURED`. ffmpeg не требуется: whisper.cpp читает Telegram-овый `.oga` (OGG/Opus) напрямую.
+
+### Установка whisper.cpp (Windows)
+
+1. Скачай `whisper-bin-x64.zip` из [релиза whisper.cpp](https://github.com/ggml-org/whisper.cpp/releases) и распакуй — внутри папка `Release/` с `whisper-cli.exe` и `ggml-*.dll`.
+2. Скачай модель: `ggml-base.bin` (~148 МБ) с [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin) (`ggml-small.bin` точнее и медленнее, `ggml-tiny.bin` ~78 МБ).
+3. Пропиши в `.env` абсолютные пути (см. ниже).
+
+Важно: `.dll` должны лежать рядом с `whisper-cli.exe` — не переноси `.exe` в одиночку.
+
 ---
 
 ## Настройка `.env`
@@ -59,6 +69,10 @@ npm run dev
 | `CURSOR_BIN` | `cursor-agent` | — |
 | `CLINE_BIN` | `roo-code` | — |
 | `HERMES_BASE_URL` / `HERMES_API_KEY` | *(пусто)* | HTTP-агент Hermes |
+| `WHISPER_BIN` | `whisper-cli` | путь к `whisper-cli.exe`; пусто/не найден = голос отключён |
+| `VOICE_MODEL_PATH` | *(пусто)* | путь к `ggml-*.bin`; пусто = голос отключён |
+| `VOICE_LANG` | `ru` | язык подсказкой (`-l`) для whisper.cpp |
+| `FFMPEG_BIN` | `ffmpeg` | только для нестандартных форматов; для `.oga` не нужен |
 | `DB_PATH` | `./data/bridge.db` | файл SQLite |
 
 Секреты живут только в `.env` / `process.env`. Они не пишутся в БД, в логи и в сообщения об ошибках.
@@ -84,6 +98,8 @@ npm run dev
 | `/help` | список команд |
 
 Фото без команды — сохраняется в `<workdir>/inbox/` и прикладывается к следующему `/ask`.
+
+Голосовое без команды — скачивается в `<workdir>/inbox/voice-<ts>.oga`, распознаётся локально через whisper.cpp и уходит в очередь как обычный `/ask` с пометкой `[voice]`. Распознанный текст бот присылает отдельным сообщением.
 
 Каждый Telegram-чат = отдельная сессия: свой агент, модель, проект и история.
 

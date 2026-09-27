@@ -258,6 +258,31 @@ export async function sendMarkdown(api: Api, chatId: number, text: string): Prom
   for (const chunk of splitMessage(text)) await sendChunkHtml(api, chatId, chunk);
 }
 
+/**
+ * Download any Telegram file by `file_id` into `destDir` and return its absolute path.
+ *
+ * The Bot API file endpoint is reached directly (the grammy Api object exposes no
+ * download helper we want to depend on). `name` is a caller-chosen filename; callers
+ * are responsible for making it unique and for not letting untrusted data into it.
+ */
+export async function saveInboundFile(
+  api: Api,
+  botToken: string,
+  fileId: string,
+  destDir: string,
+  name: string,
+): Promise<string> {
+  const file = await api.getFile(fileId);
+  if (!file.file_path) throw new Error('E_AGENT_FAILED: no file_path');
+  const res = await fetch(`https://api.telegram.org/file/bot${botToken}/${file.file_path}`);
+  if (!res.ok) throw new Error('E_AGENT_FAILED: download failed');
+  const buf = Buffer.from(await res.arrayBuffer());
+  mkdirSync(destDir, { recursive: true });
+  const abs = join(destDir, name);
+  writeFileSync(abs, buf);
+  return abs;
+}
+
 export async function savePhoto(
   api: Api,
   botToken: string,
@@ -265,14 +290,6 @@ export async function savePhoto(
   fileId: string,
   workdirInbox: string,
 ): Promise<string> {
-  const file = await api.getFile(fileId);
-  if (!file.file_path) throw new Error('E_AGENT_FAILED: no file_path');
-  const res = await fetch(`https://api.telegram.org/file/bot${botToken}/${file.file_path}`);
-  if (!res.ok) throw new Error('E_AGENT_FAILED: photo download failed');
-  const buf = Buffer.from(await res.arrayBuffer());
-  mkdirSync(workdirInbox, { recursive: true });
-  const name = `${Date.now()}.jpg`;
-  const abs = join(workdirInbox, name);
-  writeFileSync(abs, buf);
-  return abs;
+  void chatId;
+  return saveInboundFile(api, botToken, fileId, workdirInbox, `${Date.now()}.jpg`);
 }

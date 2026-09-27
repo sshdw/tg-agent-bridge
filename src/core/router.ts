@@ -12,9 +12,16 @@ import { resolveWorkdir } from '../core/permissions.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { Store } from '../storage/db.js';
 import { createStream, escapeHtml, savePhoto, sendLong } from '../telegram/stream.js';
-import { approvalKeyboard, registerCallbacks, showAgentPicker, showModelPicker, showProjectPicker } from '../telegram/callbacks.js';
+import {
+  approvalKeyboard,
+  registerCallbacks,
+  showAgentPicker,
+  showModelPicker,
+  showProjectPicker,
+} from '../telegram/callbacks.js';
 import { SCOPE } from '../telegram/keyboard.js';
 import { clear } from '../telegram/nonce.js';
+import { transcribeVoice } from '../voice/index.js';
 
 export interface Deps {
   cfg: Config;
@@ -189,6 +196,31 @@ export function registerRouter(bot: Bot, deps: Deps): void {
       await deps.io.notify(chatId, '📷 Фото сохранено. Теперь /ask с вопросом.');
     } catch {
       await deps.io.notify(chatId, '❌ Не удалось сохранить фото.');
+    }
+  });
+
+  bot.on('message:voice', async (ctx) => {
+    const chatId = ctx.chat.id;
+    try {
+      const s = getOrCreate(store, cfg, chatId);
+      const workdir = resolve(params(cfg, chatId, s.project));
+      await deps.io.notify(chatId, '🎤 Распознаю голосовое…');
+      const text = await transcribeVoice(bot.api, cfg, ctx.message.voice.file_id, workdir);
+      if (text === '') {
+        await deps.io.notify(chatId, '🔇 Не расслышал. Попробуй ещё раз или напиши текстом.');
+        return;
+      }
+      await deps.io.notify(chatId, `🎤 Распознано: ${text}`);
+      await ask(bot, deps, chatId, `[voice] ${text}`, 'ask');
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      const code = m.startsWith('E_') ? (m.split(':')[0] ?? 'E_AGENT_FAILED') : 'E_AGENT_FAILED';
+      const map: Record<string, string> = {
+        E_VOICE_NOT_CONFIGURED: '🎤 Голос не настроен. Задай WHISPER_BIN и VOICE_MODEL_PATH в .env.',
+        E_VOICE_TIMEOUT: '⏱ Распознавание не уложилось в лимит времени.',
+        E_AGENT_FAILED: '❌ Не удалось распознать голосовое.',
+      };
+      await deps.io.notify(chatId, map[code] ?? `❌ Ошибка: ${code}`);
     }
   });
 
