@@ -3,6 +3,7 @@ import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
+import { extractFileRefs } from './files.js';
 import { resolveWorkdir } from './permissions.js';
 import { getOrCreate } from './sessions.js';
 import { resolveApproval } from './approvals.js';
@@ -26,6 +27,12 @@ export interface Responder {
   streamStart(chatId: number, options?: { mode?: TaskMode; label?: string }): Promise<StreamHandle>;
   askApproval(chatId: number, command: string): Promise<boolean>;
   notify(chatId: number, text: string, keyboard?: unknown): Promise<void>;
+  /**
+   * Optional (WAVE2/FILES): send files the agent named in its reply.
+   * Kept optional so a Responder without file support still satisfies the contract;
+   * the queue only calls it when present.
+   */
+  attachFiles?(chatId: number, paths: string[]): Promise<void>;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
@@ -234,6 +241,16 @@ export class TaskQueue {
       this.store.addMessage(chatId, 'assistant', reply);
       this.store.setTaskStatus(taskId, 'done');
       await stream.finish(reply);
+      // WAVE2/FILES: attach files the answer named, when the responder
+      // supports it. Best-effort — a failed attachment must never fail the task.
+      if (this.io.attachFiles) {
+        try {
+          const refs = extractFileRefs(reply, workdir);
+          if (refs.length > 0) await this.io.attachFiles(chatId, refs.map((r) => r.abs));
+        } catch {
+          // attachment is cosmetic; the reply already landed
+        }
+      }
     } catch (e) {
       const code = errCode(e);
       this.store.setTaskStatus(taskId, code === 'E_CANCELLED' ? 'cancelled' : 'error');
