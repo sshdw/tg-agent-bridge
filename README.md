@@ -1,7 +1,15 @@
 # TG Agent Bridge — бот, совместимый с любым ИИ-агентом
 
+Мост: ты с телефона → Telegram → агент (OpenCode) на домашнем ПК. ПК включён — управляешь кодом удалённо.
 Транспорт Telegram → единый `IAgentProvider` → любой агент
 (Cursor / Cline / Hermes / WorkBuddy / OpenCode).
+
+## Токен бота (нужно сделать тебе, 2 минуты)
+
+1. В Telegram открой **@BotFather** → `/newbot` → придумай имя и username (должен кончаться на `bot`, например `my_agent_bridge_bot`).
+2. BotFather выдаст токен вида `123:ABC...` → вставь его в `.env` как `BOT_TOKEN=...`.
+3. Свой id узнай у **@userinfobot** (пришлёт число) → вставь в `.env` как `ALLOWED_CHAT_IDS=...`.
+4. `npm run dev`, с телефона `/start` — бот ответит.
 
 ## Папка
 

@@ -77,25 +77,36 @@ export interface IAgentProvider {
 ```
 /start — привет + какой агент активен
 /ask <текст> — быстрый вопрос активному агенту
-/code <задача> — кодовая задача (workdir чата)
+/code <задача> — кодовая задача (папка проекта чата)
 /agent <id> — переключить провайдера
-/model <name> — переключить модель (проксируется в провайдер)
+/model <name> — переключить модель
+/project <name|path> — привязать чат к папке проекта (внутри ALLOWED_ROOTS)
+/clone <url> — склонировать репо в WORK_ROOT
+/auto on|off — shell без подтверждения / с подтверждением
+/approve — подтвердить ожидающее действие агента
+/new — очистить историю чата
 /status — очередь + текущая задача
 /cancel — убить текущую задачу
+Фото без команды — приложить картинку к следующему /ask (сохраняется в workdir).
 ```
 
 ## 7. Безопасность и лимиты
 
-- `ALLOWED_CHAT_IDS` (csv в env). Чужой chat_id → молча игнор.
-- `workdir = ./work/<chat_id>`, `path.resolve` проверка — выход наверх запрещён.
-- Таймаут дефолт 15 мин, max ответ 4000 символов/сообщение (нарезка), rate-limit 1 задача на чат.
+- `ALLOWED_CHAT_IDS` — только id владельца. Чужой chat_id → молча игнор.
+- Файлы: агент работает только внутри `ALLOWED_ROOTS` (список папок через `;`, дефолт `./work`).
+  Каждый чат привязан к одной папке (`/project`), выход наверх запрещён (`path.resolve` проверка).
+  Про папки простыми словами: боту можно разрешить только те папки, которые ты укажешь.
+  Например `D:\projects\nx` — тогда из телефона сможешь кодить Nexora; `./work` — песочница по умолчанию.
+- Shell-команды агента: при `/auto off` бот присылает команду и ждёт `/approve`.
+- Таймаут 45 мин, max ответ 4000 символов/сообщение (нарезка), rate-limit 1 задача на чат.
+- История: вся в SQLite, в агента — последние 50 сообщений. `/new` сбрасывает.
 - Ошибки наружу: `E_AGENT_FAILED`, `E_TIMEOUT`, `E_NOT_CONFIGURED` — без команд, ключей, SQL.
 
 ## 8. Конфиг (env)
 
 ```
 BOT_TOKEN= (обязательно)
-ALLOWED_CHAT_IDS= (пусто = все, лучше заполнить)
+ALLOWED_CHAT_IDS= (обязательно, id владельца)
 DEFAULT_AGENT=opencode
 DEFAULT_MODEL=
 TASK_TIMEOUT_MS=900000
@@ -105,6 +116,9 @@ CURSOR_BIN=cursor-agent
 CLINE_BIN=roo-code
 HERMES_BASE_URL= / HERMES_API_KEY=
 WORKBUDDY_BASE_URL= / WORKBUDDY_API_KEY=
+ALLOWED_ROOTS=./work (папки через ; — например D:\projects\nx)
+AUTO_APPROVE=false
+HISTORY_LIMIT=50
 ```
 
 ## 9. Почему переживёт смену агентов

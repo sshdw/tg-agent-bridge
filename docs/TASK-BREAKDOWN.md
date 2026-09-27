@@ -4,6 +4,7 @@
 
 ## T1 — Scaffold + Telegram Core (база, без неё остальные не встанут)
 Файлы: `package.json`, `tsconfig.json`, `.env.example`, `src/index.ts`, `src/telegram/bot.ts`, `src/core/{router,sessions,queue,permissions}.ts`, `src/storage/db.ts`, `src/gateway/{types,registry}.ts`, `src/providers/mock.ts`.
+Команды T1: `/start /ask /code /agent /model /project /clone /auto /approve /new /status /cancel` + приём фото. Сессия на чат: агент, модель, проект, вся история (в контекст — последние 50). Whitelist по `ALLOWED_CHAT_IDS`, `ALLOWED_ROOTS`.
 Готово когда: `npm run dev` + `/start`, `/ask` на mock отвечают. `npx tsc --noEmit` чисто.
 
 ## T2 — spawnRunner + opencode (референсный провайдер)
