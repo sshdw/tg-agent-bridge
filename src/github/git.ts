@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { childEnv } from '../gateway/spawnRunner.js';
 
 export interface GitResult {
   code: number;
@@ -28,12 +29,13 @@ export const GIT_TIMEOUT_MS = 120_000;
 /**
  * Env for a git child. `GIT_TERMINAL_PROMPT=0` turns "asking for a password" into a
  * fast, readable failure instead of a hang on a machine with no TTY.
- * `GIT_ASKPASS` would be inherited from the parent otherwise, so it is dropped.
+ *
+ * Built on spawnRunner's `childEnv`, so BOT_TOKEN / GITHUB_TOKEN / GH_TOKEN /
+ * GITHUB_PAT / GIT_ASKPASS never reach the child: `git add/commit/push` can run
+ * repo-controlled hooks (pre-commit, pre-push), and those must not see our secrets.
  */
 function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' };
-  delete env.GIT_ASKPASS;
-  return env;
+  return childEnv({ GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat' });
 }
 
 /**
