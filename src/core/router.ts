@@ -267,7 +267,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
     );
   });
 
