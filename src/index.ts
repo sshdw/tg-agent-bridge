@@ -6,6 +6,7 @@ import type { Deps } from './core/router.js';
 import { createResponder } from './core/router.js';
 import { register } from './gateway/registry.js';
 import { MockProvider } from './providers/mock.js';
+import { OpenCodeProvider } from './providers/opencode.js';
 import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   mkdirSync(cfg.workRoot, { recursive: true });
   const store = new Store(cfg.dbPath);
+  register(new OpenCodeProvider(cfg.opencodeBin));
   register(new MockProvider());
 
   // Deps is filled in two steps: handlers read deps.queue/deps.io lazily at call time.
