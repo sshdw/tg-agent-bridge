@@ -17,8 +17,8 @@
 ## T4 — cline provider
 Файл: `src/providers/cline.ts`. CLI `roo-code`, иначе file-adapter `task.json/result.json` в workdir. Документировать в шапке файла какой путь активен.
 
-## T5 — hermes + workbuddy (HTTP)
-Файлы: `src/providers/{hermes,workbuddy}.ts` на общем `fetchRunner` (POST + AbortController + потоковый парсинг). Ключи только из env. Без ключа — `E_NOT_CONFIGURED`.
+## T5 — hermes (HTTP)
+Файл: `src/providers/hermes.ts` на общем `fetchRunner` (POST + AbortController + потоковый парсинг). Ключ только из env. Без ключа — `E_NOT_CONFIGURED`.
 
 ## T6 — Hardening + Docker
 Файлы: `Dockerfile`, `.dockerignore`, `README` run-раздел, нарезка >4000 символов, rate-limit, sanitize ошибок, `bot.log`. Финальный прогон приёмки из TZ.md п.4.

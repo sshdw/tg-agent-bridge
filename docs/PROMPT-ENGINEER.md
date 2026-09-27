@@ -41,7 +41,7 @@ STEP 1 — T2 (one agent, priority): `src/gateway/spawnRunner.ts` (shared helper
 STEP 2 — fan-out in parallel (summon 3 subagents at once, each strictly its own files, `IAgentProvider` contract frozen):
 - Subagent A (T3): `src/providers/cursor.ts` on top of `spawnRunner` (`cursor-agent --print`). No binary → `E_NOT_CONFIGURED`.
 - Subagent B (T4): `src/providers/cline.ts` — `roo-code` CLI, otherwise file adapter `task.json`/`result.json` in workdir with polling. Document which path is active in the file header.
-- Subagent C (T5): `src/providers/hermes.ts` + `src/providers/workbuddy.ts` on a shared `fetch` runner inside those files (POST `{baseUrl}/v1/agent/run`, key from env, `AbortController` on cancel, streaming parse). No key/URL → `E_NOT_CONFIGURED`.
+- Subagent C (T5): `src/providers/hermes.ts` on a shared `fetch` runner inside that file (POST `{baseUrl}/v1/agent/run`, key from env, `AbortController` on cancel, streaming parse). No key/URL → `E_NOT_CONFIGURED`.
 For each subagent: do not touch core/queue/router/DB — only its own file(s) + 1 registration line (you merge the registrations yourself afterwards to avoid conflicts). `npx tsc --noEmit` after each.
 
 STEP 3 — T6 (one agent): bring `Dockerfile`+`.dockerignore` to working state, README run section (install, `.env`, commands), rate limit already exists (1 per chat) — verify it, sanitize outward errors (only `E_*` codes, no commands/keys/SQL), `bot.log` free of secrets. Final `npm run build` + `docker build .`.

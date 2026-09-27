@@ -1,4 +1,4 @@
-export type AgentId = 'opencode' | 'cursor' | 'cline' | 'hermes' | 'workbuddy' | 'mock';
+export type AgentId = 'opencode' | 'cursor' | 'cline' | 'hermes' | 'mock';
 
 export type TaskMode = 'ask' | 'code';
 

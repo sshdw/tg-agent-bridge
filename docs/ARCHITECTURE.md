@@ -35,7 +35,7 @@ Telegram User
 
 ```ts
 // src/gateway/types.ts
-export type AgentId = 'opencode' | 'cursor' | 'cline' | 'hermes' | 'workbuddy' | 'mock';
+export type AgentId = 'opencode' | 'cursor' | 'cline' | 'hermes' | 'mock';
 
 export interface AgentTask {
   sessionId: string;      // chat_id:string
@@ -67,7 +67,7 @@ export interface IAgentProvider {
 - **opencode (референс):** `spawn('opencode', ['run', prompt, '--format', 'json'], { cwd: workdir })`. stdout построчно → `onEvent({type:'text'})`. `cancel` = `child.kill('SIGTERM')` по `sessionId`.
 - **cursor:** `spawn('cursor-agent', ['--print', prompt], ...)`. Тот же `spawnRunner`.
 - **cline:** `spawn('roo-code', [...])`. Если CLI нет — file-adapter: пишет `task.json` в workdir, поллит `result.json` (таймаут). Ядро этого не видит.
-- **hermes / workbuddy:** `fetch POST {baseUrl}/v1/agent/run {prompt, model, sessionId}`, токен из `HERMES_API_KEY` / `WORKBUDDY_API_KEY`. SSE/chunked → `onEvent`. Без URL/ключа провайдер кидает `not configured` (secret-free).
+- **hermes:** `fetch POST {baseUrl}/v1/agent/run {prompt, model, sessionId}`, токен из `HERMES_API_KEY`. SSE/chunked → `onEvent`. Без URL/ключа провайдер кидает `not configured` (secret-free).
 - **mock:** эхо с задержкой, для тестов без агентов.
 
 Общий хелпер `src/gateway/spawnRunner.ts` — один на все CLI-провайдеры (spawn, таймаут, kill-map, sanitize ошибок).
@@ -115,7 +115,6 @@ OPENCODE_BIN=opencode
 CURSOR_BIN=cursor-agent
 CLINE_BIN=roo-code
 HERMES_BASE_URL= / HERMES_API_KEY=
-WORKBUDDY_BASE_URL= / WORKBUDDY_API_KEY=
 ALLOWED_ROOTS=./work (папки через ; — например D:\projects\nx)
 AUTO_APPROVE=false
 HISTORY_LIMIT=50

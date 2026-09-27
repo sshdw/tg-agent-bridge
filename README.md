@@ -1,6 +1,6 @@
 # TG Agent Bridge
 
-Мост между тобой в Telegram и любым код-агентом (OpenCode / Cursor / Cline / Hermes / WorkBuddy), запущенным на домашнем ПК.
+Мост между тобой в Telegram и любым код-агентом (OpenCode / Cursor / Cline / Hermes), запущенным на домашнем ПК.
 Пишешь боту с телефона — агент работает на ПК в нужной папке, ответ стримится в чат.
 
 Смена агента = смена адаптера: ядро, Telegram-слой и БД не меняются.
@@ -59,7 +59,6 @@ npm run dev
 | `CURSOR_BIN` | `cursor-agent` | — |
 | `CLINE_BIN` | `roo-code` | — |
 | `HERMES_BASE_URL` / `HERMES_API_KEY` | *(пусто)* | HTTP-агент Hermes |
-| `WORKBUDDY_BASE_URL` / `WORKBUDDY_API_KEY` | *(пусто)* | HTTP-агент WorkBuddy |
 | `DB_PATH` | `./data/bridge.db` | файл SQLite |
 
 Секреты живут только в `.env` / `process.env`. Они не пишутся в БД, в логи и в сообщения об ошибках.
@@ -113,7 +112,6 @@ ALLOWED_ROOTS=./work;D:\projects\nx
 | `cursor` | `cursor-agent --print <текст>` (subprocess) | бинарник `cursor-agent` |
 | `cline` | CLI `roo-code`; если бинарника нет — файловый адаптер `task.json`/`result.json` в `<workdir>/.bridge/` | либо бинарник, либо внешний обработчик очереди |
 | `hermes` | `POST {HERMES_BASE_URL}/v1/agent/run` (SSE/чанки) | `HERMES_BASE_URL` + `HERMES_API_KEY` |
-| `workbuddy` | `POST {WORKBUDDY_BASE_URL}/v1/agent/run` (SSE/чанки) | `WORKBUDDY_BASE_URL` + `WORKBUDDY_API_KEY` |
 | `mock` | эхо с задержкой | ничего — для тестов без агентов |
 
 Если провайдер не настроен (нет бинарника/ключа), бот присылает `⚙ Провайдер не настроен`, а не падает.
@@ -152,7 +150,7 @@ docker run -d --name bridge --restart unless-stopped \
 Секреты передаются через `--env-file`, в образ не попадают (`.env` в `.dockerignore`).
 Тома нужны, чтобы история чата и файлы проектов пережили пересборку.
 
-> Внутри контейнера доступны только агенты, установленные в образе. Для CLI-агентов (`opencode`, `cursor`, `cline`) проще запускать на хосте, чем тащить их в образ; для HTTP-агентов (`hermes`, `workbuddy`) Docker подходит идеально.
+> Внутри контейнера доступны только агенты, установленные в образе. Для CLI-агентов (`opencode`, `cursor`, `cline`) проще запускать на хосте, чем тащить их в образ; для HTTP-агента (`hermes`) Docker подходит идеально.
 
 ---
 
@@ -189,7 +187,7 @@ src/
   telegram/{bot,stream}.ts # grammy, whitelist, нарезка >4000, стрим-редактирование
   core/{router,queue,sessions,permissions,approvals}.ts
   gateway/{types,registry,spawnRunner,fetchRunner}.ts
-  providers/{opencode,cursor,cline,hermes,workbuddy,mock}.ts
+  providers/{opencode,cursor,cline,hermes,mock}.ts
   storage/db.ts
 docs/                      # ARCHITECTURE.md, TZ.md, TASK-BREAKDOWN.md
 ```
@@ -200,7 +198,7 @@ docs/                      # ARCHITECTURE.md, TZ.md, TASK-BREAKDOWN.md
 
 - **Whitelist** по `ALLOWED_CHAT_IDS`; чужой chat id → молчаливый игнор.
 - **Файлы**: агент работает только внутри `ALLOWED_ROOTS`; выход наверх блокируется.
-- **Секреты**: только `process.env`. Дочернему процессу агента переменные `BOT_TOKEN`, `HERMES_API_KEY`, `WORKBUDDY_API_KEY` не передаются.
+- **Секреты**: только `process.env`. Дочернему процессу агента переменные `BOT_TOKEN`, `HERMES_API_KEY` не передаются.
 - **Ошибки**: наружу только коды (`E_AGENT_FAILED`, `E_TIMEOUT`, `E_NOT_CONFIGURED`, `E_PATH_DENIED`, `E_CANCELLED`) — без команд, ключей и SQL.
 - **Логи**: промпты и токены не пишутся; в debug — максимум 120 символов.
 - **Лимиты**: 45 мин на задачу, 4000 символов на сообщение (нарезка), 1 задача на чат одновременно.

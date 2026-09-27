@@ -7,7 +7,6 @@ export const AGENT_IDS: readonly AgentId[] = [
   'cursor',
   'cline',
   'hermes',
-  'workbuddy',
   'mock',
 ];
 
@@ -26,8 +25,6 @@ export interface Config {
   clineBin: string;
   hermesBaseUrl: string;
   hermesApiKey: string;
-  workbuddyBaseUrl: string;
-  workbuddyApiKey: string;
   dbPath: string;
 }
 
@@ -92,8 +89,6 @@ export function loadConfig(): Config {
     clineBin: str('CLINE_BIN', 'roo-code'),
     hermesBaseUrl: str('HERMES_BASE_URL').trim(),
     hermesApiKey: str('HERMES_API_KEY').trim(),
-    workbuddyBaseUrl: str('WORKBUDDY_BASE_URL').trim(),
-    workbuddyApiKey: str('WORKBUDDY_API_KEY').trim(),
     dbPath: resolve(process.cwd(), str('DB_PATH', './data/bridge.db')),
   };
 }

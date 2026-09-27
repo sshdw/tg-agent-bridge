@@ -11,7 +11,7 @@ import type { AgentEvent, AgentResult, AgentTask } from './types.js';
  */
 
 /** Env vars that must never be inherited by a spawned agent process. */
-const SECRET_ENV_KEYS = ['BOT_TOKEN', 'HERMES_API_KEY', 'WORKBUDDY_API_KEY'] as const;
+const SECRET_ENV_KEYS = ['BOT_TOKEN', 'HERMES_API_KEY'] as const;
 
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, // telegram bot token

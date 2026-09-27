@@ -3,7 +3,7 @@ import type { AgentEvent, AgentResult } from './types.js';
 import { sanitize } from './spawnRunner.js';
 
 /**
- * Shared HTTP runner for every network-based provider (hermes, workbuddy).
+ * Shared HTTP runner for the network-based provider (hermes).
  *
  * Mirror of `spawnRunner` for agents reachable over HTTP (ARCHITECTURE.md §5):
  * POST JSON with `Authorization: Bearer <apiKey>`, an `AbortController` per task,

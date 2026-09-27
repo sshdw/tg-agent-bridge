@@ -10,7 +10,6 @@ import { CursorProvider } from './providers/cursor.js';
 import { HermesProvider } from './providers/hermes.js';
 import { MockProvider } from './providers/mock.js';
 import { OpenCodeProvider } from './providers/opencode.js';
-import { WorkBuddyProvider } from './providers/workbuddy.js';
 import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 
@@ -32,7 +31,6 @@ async function main(): Promise<void> {
   register(new CursorProvider(cfg.cursorBin));
   register(new ClineProvider(cfg.clineBin));
   register(new HermesProvider(cfg.hermesBaseUrl, cfg.hermesApiKey));
-  register(new WorkBuddyProvider(cfg.workbuddyBaseUrl, cfg.workbuddyApiKey));
   register(new MockProvider());
 
   // Deps is filled in two steps: handlers read deps.queue/deps.io lazily at call time.

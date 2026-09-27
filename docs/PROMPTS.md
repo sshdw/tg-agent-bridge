@@ -15,7 +15,7 @@
 T2: src/gateway/spawnRunner.ts + src/providers/opencode.ts
 T3: src/providers/cursor.ts
 T4: src/providers/cline.ts
-T5: src/providers/hermes.ts + workbuddy.ts
+T5: src/providers/hermes.ts
 T6: Dockerfile + нарезка + лимиты + sanitize
 Контракт IAgentProvider из T1 не менять. После каждой — npx tsc --noEmit. В конце сведи registry и проверь /agent <id> для каждого.
 ```
