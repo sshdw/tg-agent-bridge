@@ -244,6 +244,11 @@ export function telegramify(prompt: string): string {
  * The queue records the user message before dispatching, so the current prompt is
  * normally the last history entry — it is removed here to avoid sending it twice.
  * Used as the fallback path when the provider cannot resume a real session.
+ *
+ * Every prompt this produces originates from Telegram, so the marker and the
+ * phone-friendly system line are applied here: providers that only call
+ * `composePrompt` (cursor, cline, hermes) then get the same decoration as opencode's
+ * resume path, without each provider re-implementing it.
  */
 export function composePrompt(task: AgentTask, maxChars = 12000): string {
   const hist = [...task.history];
@@ -262,7 +267,8 @@ export function composePrompt(task: AgentTask, maxChars = 12000): string {
     for (const m of hist) lines.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`);
     lines.push('');
   }
-  lines.push(task.prompt);
+  // The marker goes on the user turn itself; the system line closes the prompt.
+  lines.push(`${TELEGRAM_MARKER} ${task.prompt}`);
   lines.push('');
   lines.push(TELEGRAM_SYSTEM_LINE);
   const out = lines.join('\n');
