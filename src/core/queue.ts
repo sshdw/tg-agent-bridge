@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
+import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
 import { resolveWorkdir } from './permissions.js';
 import { getOrCreate } from './sessions.js';
@@ -12,10 +13,19 @@ export interface StreamHandle {
   fail(code: string): Promise<void>;
 }
 
+export interface SubmitOptions {
+  /** `/review`, `/test`, `/fix` — recorded on the task for `/cost` breakdowns. */
+  preset?: string;
+  /** Extra system-ish instruction prepended to the prompt (presets, plan comments). */
+  rolePrefix?: string;
+  /** Plan mode: park the task as `awaiting_plan` instead of executing it. */
+  planOnly?: boolean;
+}
+
 export interface Responder {
-  streamStart(chatId: number): Promise<StreamHandle>;
+  streamStart(chatId: number, options?: { mode?: TaskMode; label?: string }): Promise<StreamHandle>;
   askApproval(chatId: number, command: string): Promise<boolean>;
-  notify(chatId: number, text: string): Promise<void>;
+  notify(chatId: number, text: string, keyboard?: unknown): Promise<void>;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
@@ -39,6 +49,8 @@ export class TaskQueue {
   private pumping = new Set<number>();
   private streams = new Map<number, StreamHandle>();
   private sessionIds = new Map<number, string>();
+  /** Tasks parked on plan approval: chatId -> taskId awaiting a decision. */
+  private planWaiting = new Map<number, { taskId: number; plan: string; reworks: number }>();
 
   constructor(
     private store: Store,
@@ -46,17 +58,84 @@ export class TaskQueue {
     private io: Responder,
   ) {}
 
-  submit(chatId: number, prompt: string, mode: TaskMode, images: string[]): 'started' | 'queued' {
+  submit(
+    chatId: number,
+    prompt: string,
+    mode: TaskMode,
+    images: string[],
+    options: SubmitOptions = {},
+  ): 'started' | 'queued' | 'planned' {
     const s = getOrCreate(this.store, this.cfg, chatId);
     this.store.addMessage(chatId, 'user', prompt);
-    this.store.createTask(chatId, s.agent, mode, prompt, images);
+    const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
+    if (options.planOnly === true) {
+      // Plan mode: the task sits here until the owner approves the plan via button.
+      this.store.setTaskStatus(taskId, 'awaiting_plan');
+      return 'planned';
+    }
     if (this.pumping.has(chatId)) return 'queued';
     void this.pump(chatId);
     return 'started';
   }
 
-  async cancel(chatId: number): Promise<'approval' | 'task' | 'nothing'> {
+  /** Plan flow: the owner approved a parked task — start executing it. */
+  approvePlan(chatId: number): number | null {
+    const waiting = this.planWaiting.get(chatId);
+    if (!waiting) return null;
+    this.planWaiting.delete(chatId);
+    this.store.setTaskStatus(waiting.taskId, 'pending');
+    if (!this.pumping.has(chatId)) void this.pump(chatId);
+    return waiting.taskId;
+  }
+
+  /** Plan flow: the owner rejected/wants another round. Returns false when out of rounds. */
+  reworkPlan(chatId: number, comment: string): { rounds: number } | null {
+    const waiting = this.planWaiting.get(chatId);
+    if (!waiting) return null;
+    if (waiting.reworks >= MAX_PLAN_REWORKS) {
+      // Out of rework rounds: run the task anyway, as specified.
+      this.planWaiting.delete(chatId);
+      this.store.setTaskStatus(waiting.taskId, 'pending');
+      if (!this.pumping.has(chatId)) void this.pump(chatId);
+      return null;
+    }
+    waiting.reworks += 1;
+    const task = this.store.getTask(waiting.taskId);
+    if (task) {
+      this.store.setTaskPlan(waiting.taskId, waiting.plan);
+      this.store.addMessage(chatId, 'user', comment);
+      this.store.createTask(
+        chatId,
+        task.agent,
+        task.mode,
+        `${PLAN_REWORK_PREFIX}${comment}`,
+        [],
+        'plan-rework',
+      );
+      this.store.setTaskStatus(waiting.taskId, 'cancelled');
+    }
+    this.planWaiting.delete(chatId);
+    void this.pump(chatId);
+    return { rounds: waiting.reworks };
+  }
+
+  /** Register a plan for button-driven approval, keyed by chat. */
+  parkPlan(chatId: number, taskId: number, plan: string): void {
+    this.planWaiting.set(chatId, { taskId, plan, reworks: 0 });
+  }
+
+  hasPlan(chatId: number): boolean {
+    return this.planWaiting.has(chatId);
+  }
+
+  async cancel(chatId: number): Promise<'approval' | 'task' | 'plan' | 'nothing'> {
     if (resolveApproval(chatId, false)) return 'approval';
+    if (this.planWaiting.has(chatId)) {
+      const w = this.planWaiting.get(chatId);
+      this.planWaiting.delete(chatId);
+      if (w) this.store.setTaskStatus(w.taskId, 'cancelled');
+      return 'plan';
+    }
     const task = this.store.runningTask(chatId);
     if (!task || !this.pumping.has(chatId)) return 'nothing';
     this.store.setTaskStatus(task.id, 'cancelled');
@@ -72,8 +151,12 @@ export class TaskQueue {
     return 'task';
   }
 
-  status(chatId: number): { running: boolean; pending: number } {
-    return { running: this.pumping.has(chatId), pending: this.store.pendingCount(chatId) };
+  status(chatId: number): { running: boolean; pending: number; plan: boolean } {
+    return {
+      running: this.pumping.has(chatId),
+      pending: this.store.pendingCount(chatId),
+      plan: this.planWaiting.has(chatId),
+    };
   }
 
   private async pump(chatId: number): Promise<void> {
@@ -93,12 +176,16 @@ export class TaskQueue {
   }
 
   private async execute(chatId: number, taskId: number): Promise<void> {
-    const stream = await this.io.streamStart(chatId);
+    const task0 = this.store.getTask(taskId);
+    const stream = await this.io.streamStart(chatId, {
+      mode: (task0?.mode as TaskMode) ?? 'ask',
+      label: task0?.preset ?? '',
+    });
     this.streams.set(chatId, stream);
     this.store.setTaskStatus(taskId, 'running');
     try {
       const s = getOrCreate(this.store, this.cfg, chatId);
-      const task = this.store.runningTask(chatId);
+      const task = this.store.getTask(taskId);
       if (!task) throw new Error('E_NO_TASK');
       const workdir = resolveWorkdir(this.cfg, chatId, s.project);
       const history: HistoryItem[] = this.store
@@ -119,7 +206,17 @@ export class TaskQueue {
         autoApprove: s.autoApprove,
         timeoutMs: this.cfg.taskTimeoutMs,
         history,
+        // Only opencode holds a real session today; other providers ignore it and
+        // get history injection from `composePrompt`.
+        resumeSessionId: task.agent === 'opencode' ? s.agentSessionId : '',
         requestApproval: (cmd) => this.io.askApproval(chatId, cmd),
+        onSessionId: (id) => {
+          try {
+            this.store.setAgentSessionId(chatId, id === '' ? null : id);
+          } catch {
+            // a failed session-id write must not fail the task itself
+          }
+        },
       };
       const provider = getProvider(agentTask.agent);
       let full = '';
@@ -132,9 +229,11 @@ export class TaskQueue {
       const result = await withTimeout(provider.run(agentTask, onEvent), this.cfg.taskTimeoutMs, () => {
         void provider.cancel(sessionId);
       });
-      this.store.addMessage(chatId, 'assistant', result.text === '' ? full : result.text);
+      const reply = result.text === '' ? full : result.text;
+      this.store.setTaskCost(taskId, result.costUsd);
+      this.store.addMessage(chatId, 'assistant', reply);
       this.store.setTaskStatus(taskId, 'done');
-      await stream.finish(result.text === '' ? full : result.text);
+      await stream.finish(reply);
     } catch (e) {
       const code = errCode(e);
       this.store.setTaskStatus(taskId, code === 'E_CANCELLED' ? 'cancelled' : 'error');
@@ -142,3 +241,21 @@ export class TaskQueue {
     }
   }
 }
+
+/** Plan mode: at most two rework rounds, then the task runs regardless. */
+export const MAX_PLAN_REWORKS = 2;
+
+export const PLAN_REWORK_PREFIX =
+  'The user reviewed your plan and asked for changes. Produce an UPDATED short plan only, do not implement yet. Comment: ';
+
+/** Instruction prepended to a /code turn when plan mode is on. */
+export const PLAN_FIRST_INSTRUCTION =
+  'Plan first. Reply with a SHORT plan (max 8 bullet points): files to touch, steps, risks. Do NOT write code or modify files in this turn.';
+
+/** Turn a parked plan request into the composed prompt actually sent to the agent. */
+export function planPrompt(prompt: string): string {
+  return `${PLAN_FIRST_INSTRUCTION}\n\n${prompt}`;
+}
+
+/** Exported so the queue can hand `composePrompt` a plan-shaped task when needed. */
+export { composePrompt };

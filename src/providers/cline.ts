@@ -155,7 +155,7 @@ export class ClineProvider implements IAgentProvider {
             throw new Error(sanitize(`E_AGENT_FAILED: exit ${result.exitCode}`));
           }
           onEvent({ type: 'text', delta: result.text });
-          return { text: result.text, exitCode: result.exitCode };
+          return { text: result.text, exitCode: result.exitCode, sessionId: '', costUsd: null };
         }
 
         await delay(POLL_MS);
@@ -189,7 +189,8 @@ export class ClineProvider implements IAgentProvider {
     const o = parsed as { text?: unknown; exitCode?: unknown };
     if (typeof o.text !== 'string' || typeof o.exitCode !== 'number') return null;
     if (!Number.isInteger(o.exitCode)) return null;
-    return { text: o.text, exitCode: o.exitCode };
+    // The file adapter has no session concept and never reports a price.
+    return { text: o.text, exitCode: o.exitCode, sessionId: '', costUsd: null };
   }
 
   /** Best-effort removal of adapter artifacts; never masks the real outcome. */

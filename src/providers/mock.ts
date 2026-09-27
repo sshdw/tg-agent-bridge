@@ -27,7 +27,7 @@ export class MockProvider implements IAgentProvider {
       text += line;
       onEvent({ type: 'text', delta: line });
     }
-    return { text, exitCode: 0 };
+    return { text, exitCode: 0, sessionId: '', costUsd: null };
   }
 
   async cancel(sessionId: string): Promise<void> {

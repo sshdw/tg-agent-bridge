@@ -165,7 +165,7 @@ export function runFetch(spec: FetchSpec, onEvent: (e: AgentEvent) => void): Pro
 
         const body = res.body;
         if (body === null) {
-          settle(() => resolve({ text, exitCode: 0 }));
+          settle(() => resolve({ text, exitCode: 0, sessionId: '', costUsd: null }));
           return;
         }
 
@@ -211,7 +211,7 @@ export function runFetch(spec: FetchSpec, onEvent: (e: AgentEvent) => void): Pro
           }
         }
 
-        settle(() => resolve({ text, exitCode: 0 }));
+        settle(() => resolve({ text, exitCode: 0, sessionId: '', costUsd: null }));
       } catch (e) {
         settle(() => {
           if (run.reason === 'timeout') reject(new Error('E_TIMEOUT'));

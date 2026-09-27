@@ -25,6 +25,18 @@ export interface Config {
   clineBin: string;
   hermesBaseUrl: string;
   hermesApiKey: string;
+  /** Classic PAT with `repo` + `workflow`. Empty disables every /commit /pr /ci /watch path. */
+  githubToken: string;
+  /** Absolute path to whisper-cli(.exe). Empty = voice disabled. */
+  whisperBin: string;
+  /** Absolute path to the ggml .bin model. Empty = voice disabled. */
+  voiceModelPath: string;
+  /** Spoken language hint passed to whisper.cpp (`-l`). */
+  voiceLang: string;
+  /** Absolute path to ffmpeg; empty = rely on PATH. */
+  ffmpegBin: string;
+  /** How often the CI poller ticks. */
+  ciPollMs: number;
   dbPath: string;
 }
 
@@ -51,6 +63,33 @@ function str(key: string, fallback = ''): string {
 function num(key: string, fallback: number): number {
   const v = Number(process.env[key]);
   return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/**
+ * Resolve a bare binary name to its Windows launcher when only the extensionless
+ * shim is on PATH. npm installs `opencode`, `opencode.cmd` and `opencode.ps1`
+ * side by side; `spawn('opencode')` finds none of them without a shell, so we
+ * prefer the `.cmd` we can prove exists. Explicit env overrides always win.
+ */
+function resolveBin(override: string, fallback: string): string {
+  if (override !== '') return override;
+  if (process.platform !== 'win32') return fallback;
+  const dirs = (process.env.PATH ?? '').split(';').filter((d) => d.trim() !== '');
+  if (dirs.length === 0) {
+    const appData = process.env.APPDATA ?? '';
+    if (appData !== '') dirs.push(`${appData}\\npm`);
+  }
+  for (const dir of dirs) {
+    for (const ext of ['.cmd', '.exe', '']) {
+      const p = `${dir.replace(/[\\/]+$/, '')}\\${fallback}${ext}`;
+      try {
+        if (existsSync(p)) return p;
+      } catch {
+        // unreadable PATH entry: skip
+      }
+    }
+  }
+  return fallback;
 }
 
 export function loadConfig(): Config {
@@ -84,11 +123,17 @@ export function loadConfig(): Config {
     allowedRoots,
     autoApprove: str('AUTO_APPROVE', 'false').trim().toLowerCase() === 'true',
     historyLimit: num('HISTORY_LIMIT', 50),
-    opencodeBin: str('OPENCODE_BIN', 'opencode'),
-    cursorBin: str('CURSOR_BIN', 'cursor-agent'),
-    clineBin: str('CLINE_BIN', 'roo-code'),
+    opencodeBin: resolveBin(str('OPENCODE_BIN').trim(), 'opencode'),
+    cursorBin: resolveBin(str('CURSOR_BIN').trim(), 'cursor-agent'),
+    clineBin: resolveBin(str('CLINE_BIN').trim(), 'roo-code'),
     hermesBaseUrl: str('HERMES_BASE_URL').trim(),
     hermesApiKey: str('HERMES_API_KEY').trim(),
+    githubToken: str('GITHUB_TOKEN').trim(),
+    whisperBin: resolveBin(str('WHISPER_BIN').trim(), 'whisper-cli'),
+    voiceModelPath: str('VOICE_MODEL_PATH').trim(),
+    voiceLang: str('VOICE_LANG', 'ru').trim() || 'ru',
+    ffmpegBin: resolveBin(str('FFMPEG_BIN').trim(), 'ffmpeg'),
+    ciPollMs: num('CI_POLL_MS', 300000),
     dbPath: resolve(process.cwd(), str('DB_PATH', './data/bridge.db')),
   };
 }
