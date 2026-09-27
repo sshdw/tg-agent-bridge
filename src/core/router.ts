@@ -6,6 +6,7 @@ import type { Config } from '../config.js';
 import { AGENT_IDS } from '../config.js';
 import { hasApproval, resolveApproval } from '../core/approvals.js';
 import type { Responder } from '../core/queue.js';
+import { COST_USAGE, formatCostReply, parseCostArg } from './cost.js';
 import { TaskQueue } from '../core/queue.js';
 import { getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
@@ -179,6 +180,14 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     if (r === 'task') return; // fail() already messaged
     return deps.io.notify(chatId, 'Нечего отменять.');
   });
+
+  // WAVE2/COST-BEGIN
+  bot.command('cost', (ctx) => {
+    const period = parseCostArg(arg(ctx.message?.text));
+    if (period === null) return deps.io.notify(ctx.chat.id, COST_USAGE);
+    return deps.io.notify(ctx.chat.id, formatCostReply(store, ctx.chat.id, period));
+  });
+  // WAVE2/COST-END
 
   bot.on('message:photo', async (ctx) => {
     const chatId = ctx.chat.id;
