@@ -14,6 +14,9 @@ import {
 } from '../core/files.js';
 import type { Responder } from '../core/queue.js';
 import { TaskQueue } from '../core/queue.js';
+import { runExec } from '../core/exec.js';
+import { CODE_USAGE, registerPlanFlow, requestCode, tryPlanRework } from '../core/plan.js';
+import { PRESET_NAMES, applyPreset, type PresetName } from '../core/presets.js';
 import { getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
 // [WAVE2-GITHUB] §1.6 — handlers live in the github layer so Core stays a command table.
@@ -29,6 +32,7 @@ import {
   showProjectPicker,
 } from '../telegram/callbacks.js';
 import { SCOPE } from '../telegram/keyboard.js';
+import { runSys } from './sys.js';
 import { clear } from '../telegram/nonce.js';
 import { transcribeVoice } from '../voice/index.js';
 
@@ -51,7 +55,7 @@ function ask(bot: Bot, deps: Deps, chatId: number, prompt: string, mode: 'ask' |
   if (prompt === '') {
     return deps.io.notify(chatId, mode === 'ask' ? 'Использование: /ask <вопрос>' : 'Использование: /code <задача>');
   }
-  const images = takePendingFiles(chatId);
+  const images = takeImages(chatId);
   const state = deps.queue.submit(chatId, prompt, mode, images);
   if (state === 'queued') return deps.io.notify(chatId, '⏳ В очередь. Дождись текущей задачи.');
   return Promise.resolve();
@@ -77,7 +81,7 @@ function requireBot(): Bot {
   return liveBot;
 }
 
-function takePendingFiles(chatId: number): string[] {
+function takeImages(chatId: number): string[] {
   const files = pendingFiles.get(chatId) ?? [];
   pendingFiles.delete(chatId);
   return files;
@@ -266,12 +270,46 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — план, запуск после одобрения\n/review • /test • /fix <симптом> — пресеты /code\n/exec <команда> — shell в папке проекта\n/sys — CPU/RAM/диск\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
     );
   });
 
   bot.command('ask', (ctx) => ask(bot, deps, ctx.chat.id, arg(ctx.message?.text), 'ask'));
-  bot.command('code', (ctx) => ask(bot, deps, ctx.chat.id, arg(ctx.message?.text), 'code'));
+
+  // WAVE2/EXEC-BEGIN (/exec, /sys, plan-mode /code, preset commands)
+  registerPlanFlow(deps.queue, deps.io);
+
+  const codeLike = (
+    ctx: { chat: { id: number }; message?: { text?: string } },
+    raw: string,
+    preset: '' | PresetName,
+  ): Promise<void> => {
+    const chatId = ctx.chat.id;
+    if (raw === '' && (preset === '' || preset === 'fix')) {
+      return deps.io.notify(
+        chatId,
+        preset === 'fix' ? 'Использование: /fix <симптом> — что сломалось?' : CODE_USAGE,
+      );
+    }
+    const busy = deps.queue.status(chatId).running;
+    const state = requestCode(deps, chatId, preset === '' ? raw : applyPreset(preset, raw), takeImages(chatId), {
+      preset,
+    });
+    if (state === 'planned' && busy) return deps.io.notify(chatId, '🗺 Готовлю план…');
+    return Promise.resolve();
+  };
+
+  // Plan mode: /code drafts a plan first; it runs only after approve.
+  bot.command('code', (ctx) => codeLike(ctx, arg(ctx.message?.text), ''));
+
+  // Presets = /code with a fixed role prefix (defined once in presets.ts).
+  for (const name of PRESET_NAMES) {
+    bot.command(name, (ctx) => codeLike(ctx, arg(ctx.message?.text), name));
+  }
+
+  bot.command('exec', (ctx) => runExec(deps, ctx.chat.id, arg(ctx.message?.text)));
+  bot.command('sys', (ctx) => runSys(deps, ctx.chat.id));
+  // WAVE2/EXEC-END
 
   bot.command('agent', (ctx) => {
     const chatId = ctx.chat.id;
@@ -443,7 +481,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     }
   });
 
-  bot.on('message:text', (ctx) => {
+  bot.on('message:text', async (ctx) => {
     const chatId = ctx.chat.id;
     const text = ctx.message.text.trim();
     if (hasApproval(chatId)) {
@@ -452,6 +490,8 @@ export function registerRouter(bot: Bot, deps: Deps): void {
       clear(chatId, SCOPE.approve);
       return deps.io.notify(chatId, ok ? '✅ Разрешено.' : 'Отклонено.');
     }
+    // WAVE2/EXEC (plan rework): plain text while a plan is parked = plan comment.
+    if (await tryPlanRework(deps, chatId, text)) return;
     return ask(bot, deps, chatId, text, 'ask');
   });
 }

@@ -57,7 +57,22 @@ export class TaskQueue {
   private streams = new Map<number, StreamHandle>();
   private sessionIds = new Map<number, string>();
   /** Tasks parked on plan approval: chatId -> taskId awaiting a decision. */
-  private planWaiting = new Map<number, { taskId: number; plan: string; reworks: number }>();
+  private planWaiting = new Map<number, { taskId: number; plan: string; reworks: number; origin: string }>();
+  // WAVE2/EXEC-BEGIN (plan turns: agent drafts a plan first, chat approves, then it runs)
+  /** Task ids currently running as plan turns (stored prompt is the real one). */
+  private planTurns = new Set<number>();
+  /** Plan turn id -> original implementation prompt (restored on approve). */
+  private planOrigin = new Map<number, string>();
+  /** Plan turn id -> rework rounds already spent. */
+  private planRounds = new Map<number, number>();
+  /** Set by plan.ts: deliver the approve/rework keyboard after a plan turn. */
+  private planNotify: ((chatId: number, taskId: number, plan: string) => Promise<void>) | null = null;
+
+  /** plan.ts delivers the approve/rework keyboard through this hook (queue stays telegram-free). */
+  onPlanReady(fn: (chatId: number, taskId: number, plan: string) => Promise<void>): void {
+    this.planNotify = fn;
+  }
+  // WAVE2/EXEC-END
 
   constructor(
     private store: Store,
@@ -76,8 +91,13 @@ export class TaskQueue {
     this.store.addMessage(chatId, 'user', prompt);
     const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
     if (options.planOnly === true) {
-      // Plan mode: the task sits here until the owner approves the plan via button.
-      this.store.setTaskStatus(taskId, 'awaiting_plan');
+      // WAVE2/EXEC (plan turn): the stored prompt stays the real one; the pump
+      // runs the agent for a plan, execute() wraps the prompt and parks the result.
+      this.planTurns.add(taskId);
+      this.planOrigin.set(taskId, prompt);
+      this.planRounds.set(taskId, 0);
+      if (this.pumping.has(chatId)) return 'planned';
+      void this.pump(chatId);
       return 'planned';
     }
     if (this.pumping.has(chatId)) return 'queued';
@@ -85,50 +105,65 @@ export class TaskQueue {
     return 'started';
   }
 
-  /** Plan flow: the owner approved a parked task — start executing it. */
+  /** Plan flow: the owner approved a parked task — restore the real prompt and run it. */
   approvePlan(chatId: number): number | null {
     const waiting = this.planWaiting.get(chatId);
     if (!waiting) return null;
     this.planWaiting.delete(chatId);
+    // The parked row holds a plan-turn (or rework) prompt: put the original
+    // implementation prompt back, with the approved plan attached as context.
+    const task = this.store.getTask(waiting.taskId);
+    const origin = waiting.origin !== '' ? waiting.origin : (task?.prompt ?? '');
+    this.store.setTaskPrompt(waiting.taskId, `${origin}\n\nApproved plan to follow:\n${waiting.plan}`);
     this.store.setTaskStatus(waiting.taskId, 'pending');
     if (!this.pumping.has(chatId)) void this.pump(chatId);
     return waiting.taskId;
   }
 
-  /** Plan flow: the owner rejected/wants another round. Returns false when out of rounds. */
+  /**
+   * Plan flow: plain-text reply treated as a plan comment. Follow-up runs are
+   * plan turns too (buttons each round). Returns false when out of rounds —
+   * the caller then runs the task anyway.
+   */
   reworkPlan(chatId: number, comment: string): { rounds: number } | null {
     const waiting = this.planWaiting.get(chatId);
     if (!waiting) return null;
     if (waiting.reworks >= MAX_PLAN_REWORKS) {
       // Out of rework rounds: run the task anyway, as specified.
       this.planWaiting.delete(chatId);
+      const task = this.store.getTask(waiting.taskId);
+      const origin = waiting.origin !== '' ? waiting.origin : (task?.prompt ?? '');
+      this.store.setTaskPrompt(waiting.taskId, `${origin}\n\nApproved plan to follow:\n${waiting.plan}`);
       this.store.setTaskStatus(waiting.taskId, 'pending');
       if (!this.pumping.has(chatId)) void this.pump(chatId);
       return null;
     }
-    waiting.reworks += 1;
+    const rounds = waiting.reworks + 1;
     const task = this.store.getTask(waiting.taskId);
-    if (task) {
-      this.store.setTaskPlan(waiting.taskId, waiting.plan);
-      this.store.addMessage(chatId, 'user', comment);
-      this.store.createTask(
-        chatId,
-        task.agent,
-        task.mode,
-        `${PLAN_REWORK_PREFIX}${comment}`,
-        [],
-        'plan-rework',
-      );
-      this.store.setTaskStatus(waiting.taskId, 'cancelled');
-    }
+    const origin = waiting.origin !== '' ? waiting.origin : (task?.prompt ?? '');
+    this.store.setTaskPlan(waiting.taskId, waiting.plan);
+    this.store.addMessage(chatId, 'user', comment);
+    this.store.setTaskStatus(waiting.taskId, 'cancelled');
     this.planWaiting.delete(chatId);
-    void this.pump(chatId);
-    return { rounds: waiting.reworks };
+    const s = getOrCreate(this.store, this.cfg, chatId);
+    const nextId = this.store.createTask(
+      chatId,
+      task?.agent ?? s.agent,
+      task?.mode ?? 'code',
+      `${PLAN_REWORK_PREFIX}${comment}`,
+      [],
+      'plan-rework',
+    );
+    this.planTurns.add(nextId);
+    this.planOrigin.set(nextId, origin);
+    this.planRounds.set(nextId, rounds);
+    if (!this.pumping.has(chatId)) void this.pump(chatId);
+    return { rounds };
   }
 
   /** Register a plan for button-driven approval, keyed by chat. */
-  parkPlan(chatId: number, taskId: number, plan: string): void {
-    this.planWaiting.set(chatId, { taskId, plan, reworks: 0 });
+  parkPlan(chatId: number, taskId: number, plan: string, reworks = 0, origin = ''): void {
+    this.planWaiting.set(chatId, { taskId, plan, reworks, origin });
   }
 
   hasPlan(chatId: number): boolean {
@@ -207,7 +242,9 @@ export class TaskQueue {
         agent: task.agent as AgentId,
         mode: task.mode as TaskMode,
         model: s.model,
-        prompt: task.prompt,
+        // WAVE2/EXEC (plan turn): the stored prompt is the real one; the plan
+        // instruction wraps it here so approve can run the original as-is.
+        prompt: this.planTurns.has(taskId) ? planPrompt(task.prompt) : task.prompt,
         images,
         workdir,
         autoApprove: s.autoApprove,
@@ -237,6 +274,28 @@ export class TaskQueue {
         void provider.cancel(sessionId);
       });
       const reply = result.text === '' ? full : result.text;
+      // WAVE2/EXEC-BEGIN (plan turn completion: park the plan, ask to run)
+      if (this.planTurns.delete(taskId)) {
+        const origin = this.planOrigin.get(taskId) ?? task.prompt;
+        const rounds = this.planRounds.get(taskId) ?? 0;
+        this.planOrigin.delete(taskId);
+        this.planRounds.delete(taskId);
+        this.store.setTaskPlan(taskId, reply);
+        this.store.addMessage(chatId, 'assistant', reply);
+        this.store.setTaskStatus(taskId, 'awaiting_plan');
+        this.parkPlan(chatId, taskId, reply, rounds, origin);
+        await stream.finish(reply);
+        const notify = this.planNotify;
+        if (notify) {
+          try {
+            await notify(chatId, taskId, reply);
+          } catch {
+            // the plan itself is already delivered; a dead keyboard is minor
+          }
+        }
+        return;
+      }
+      // WAVE2/EXEC-END
       this.store.setTaskCost(taskId, result.costUsd);
       this.store.addMessage(chatId, 'assistant', reply);
       this.store.setTaskStatus(taskId, 'done');
@@ -253,6 +312,10 @@ export class TaskQueue {
       }
     } catch (e) {
       const code = errCode(e);
+      // WAVE2/EXEC (plan turn): a failed plan leaves nothing parked — clean up.
+      this.planTurns.delete(taskId);
+      this.planOrigin.delete(taskId);
+      this.planRounds.delete(taskId);
       this.store.setTaskStatus(taskId, code === 'E_CANCELLED' ? 'cancelled' : 'error');
       await stream.fail(code);
     }
