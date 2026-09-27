@@ -12,6 +12,9 @@ import { resolveWorkdir } from '../core/permissions.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { Store } from '../storage/db.js';
 import { createStream, escapeHtml, savePhoto, sendLong } from '../telegram/stream.js';
+import { approvalKeyboard, registerCallbacks, showAgentPicker, showModelPicker, showProjectPicker } from '../telegram/callbacks.js';
+import { SCOPE } from '../telegram/keyboard.js';
+import { clear } from '../telegram/nonce.js';
 
 export interface Deps {
   cfg: Config;
@@ -70,6 +73,9 @@ function runClone(deps: Deps, chatId: number, url: string): Promise<void> {
 export function registerRouter(bot: Bot, deps: Deps): void {
   const { cfg, store } = deps;
 
+  // Inline-button callbacks share the same whitelist gate as messages.
+  registerCallbacks(bot, deps);
+
   bot.command('start', (ctx) => {
     const chatId = ctx.chat.id;
     const s = getOrCreate(store, cfg, chatId);
@@ -82,7 +88,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/agent <id> — сменить агента (${availableProviders().join(', ')})\n/model <name> — сменить модель\n/project <name|path> — папка проекта\n/clone <url> — склонировать репо\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — кодовая задача\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить`,
     );
   });
 
@@ -93,8 +99,8 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     const chatId = ctx.chat.id;
     const id = arg(ctx.message?.text);
     if (id === '') {
-      const s = getOrCreate(store, cfg, chatId);
-      return deps.io.notify(chatId, `Текущий: ${s.agent}\nДоступны: ${availableProviders().join(', ')}`);
+      // No argument: show the picker keyboard; the text list stays as the message body.
+      return showAgentPicker(ctx, deps);
     }
     if (!(AGENT_IDS as readonly string[]).includes(id)) {
       return deps.io.notify(chatId, `Нет такого агента. Доступны: ${availableProviders().join(', ')}`);
@@ -110,17 +116,15 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('model', (ctx) => {
     const chatId = ctx.chat.id;
     const m = arg(ctx.message?.text);
+    if (m === '') return showModelPicker(ctx, deps);
     updateSession(store, chatId, { model: m });
-    return deps.io.notify(chatId, m === '' ? 'Модель сброшена (default).' : `Модель: ${m}`);
+    return deps.io.notify(chatId, `Модель: ${m}`);
   });
 
   bot.command('project', (ctx) => {
     const chatId = ctx.chat.id;
     const p = arg(ctx.message?.text);
-    if (p === '') {
-      const s = getOrCreate(store, cfg, chatId);
-      return deps.io.notify(chatId, `Проект: ${s.project === '' ? '(песочница)' : s.project}`);
-    }
+    if (p === '') return showProjectPicker(ctx, deps);
     try {
       resolveWorkdir(cfg, chatId, p);
       updateSession(store, chatId, { project: p });
@@ -146,6 +150,8 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('approve', (ctx) => {
     const chatId = ctx.chat.id;
     if (!resolveApproval(chatId, true)) return deps.io.notify(chatId, 'Нечего подтверждать.');
+    // The decision is made: drop the button's nonces so it cannot be tapped again.
+    clear(chatId, SCOPE.approve);
     return deps.io.notify(chatId, '✅ Разрешено.');
   });
 
@@ -192,6 +198,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     if (hasApproval(chatId)) {
       const ok = /^(да|yes|ага|ok|\+|approve)$/i.test(text);
       resolveApproval(chatId, ok);
+      clear(chatId, SCOPE.approve);
       return deps.io.notify(chatId, ok ? '✅ Разрешено.' : 'Отклонено.');
     }
     return ask(bot, deps, chatId, text, 'ask');
@@ -210,10 +217,15 @@ export function createResponder(bot: Bot): Responder {
     },
     askApproval: async (chatId, command) => {
       const { requestApproval } = await import('../core/approvals.js');
-      await bot.api.sendMessage(chatId, `Агент хочет выполнить:\n<code>${escapeHtml(command)}</code>\n\n/approve — разрешить, /cancel — отклонить`, {
-        parse_mode: 'HTML',
-      });
-      return requestApproval(chatId);
+      // Register the pending promise BEFORE sending the keyboard, so a fast tap
+      // cannot race the approval into "нечего подтверждать".
+      const pending = requestApproval(chatId);
+      await bot.api.sendMessage(
+        chatId,
+        `Агент хочет выполнить:\n<code>${escapeHtml(command)}</code>\n\nНажми кнопку или /approve — разрешить, /cancel — отклонить`,
+        { parse_mode: 'HTML', reply_markup: approvalKeyboard(chatId) },
+      );
+      return pending;
     },
   };
 }
