@@ -88,6 +88,7 @@ export class GitHubClient {
   async createPullRequest(input: CreatePrInput): Promise<PullRequest> {
     return this.request<PullRequest>(`/repos/${input.repo}/pulls`, {
       method: 'POST',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         title: input.title,
         head: input.head,
@@ -115,6 +116,15 @@ export class GitHubClient {
 /** Validate an `owner/repo` pair before it reaches the API or a SQL row. */
 export function isRepoSlug(s: string): boolean {
   return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/.test(s);
+}
+
+/**
+ * Validate an optional branch filter before it reaches the API, a SQL row or a
+ * chat echo. Letters, digits, `.` `_` `-` `/` only: no whitespace, no shell
+ * metachars, no control characters smuggled in from chat input.
+ */
+export function isBranchName(s: string): boolean {
+  return /^[A-Za-z0-9._/-]{1,100}$/.test(s);
 }
 
 /**

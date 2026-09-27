@@ -11,7 +11,7 @@
  * half-broken repo must never surface a git stack trace to the owner's phone.
  */
 
-import { GitHubClient, isRepoSlug, runStatus, type WorkflowRun } from './client.js';
+import { GitHubClient, isBranchName, isRepoSlug, runStatus, type WorkflowRun } from './client.js';
 import {
   buildCommitArgs,
   currentBranch,
@@ -107,7 +107,9 @@ export async function handleCommit(
   const sha = await runGit(workdir, ['rev-parse', '--short', 'HEAD'], 15_000);
   const short = sha.code === 0 ? sha.stdout.trim() : '?';
   const branch = (await currentBranch(workdir)) ?? '?';
-  return `✅ ${short} → ${branch}\n${msg.split('\n')[0] ?? ''}`;
+  // Echo only the first line, bounded: the message is unbounded chat input.
+  const firstLine = (msg.split('\n')[0] ?? '').slice(0, 200);
+  return `✅ ${short} → ${branch}\n${firstLine}`;
 }
 
 // ----------------------------------------------------------------- /pr
@@ -187,27 +189,36 @@ function emoji(status: string): string {
   return '🟡';
 }
 
-function renderRuns(repo: string, runs: WorkflowRun[]): string {
-  if (runs.length === 0) return `CI ${repo}: запусков нет.`;
+function renderRuns(repo: string, runs: WorkflowRun[], branch = ''): string {
+  const head = branch === '' ? `CI ${repo}` : `CI ${repo} (${branch})`;
+  if (runs.length === 0) return `${head}: запусков нет.`;
   const lines = runs.map((r) => {
     const status = runStatus(r);
-    const branch = r.head_branch === '' ? '' : ` ${r.head_branch}`;
+    const br = r.head_branch === '' ? '' : ` ${r.head_branch}`;
     const sha = r.head_sha.slice(0, 7);
     const name = r.name === '' ? '(workflow)' : r.name;
-    return `${emoji(status)} ${status}${branch} ${sha} — ${name}\n${r.html_url}`;
+    return `${emoji(status)} ${status}${br} ${sha} — ${name}\n${r.html_url}`;
   });
-  return `CI ${repo}\n${lines.join('\n')}`;
+  return `${head}\n${lines.join('\n')}`;
 }
 
 export async function handleCi(deps: HandlerDeps, repoArg: string): Promise<string> {
-  const repo = repoArg.trim();
-  if (repo === '') return 'Использование: /ci <owner/repo>';
+  const parts = repoArg.trim().split(/\s+/).filter((w) => w !== '');
+  const repo = parts[0] ?? '';
+  if (repo === '') return 'Использование: /ci <owner/repo> [ветка]';
   if (!isRepoSlug(repo)) return '❌ E_GH_SLUG: нужен формат owner/repo.';
+
+  // Extra words beyond the branch are ignored — the router already passes the
+  // whole tail, and a pasted URL with trailing junk must not become API input.
+  const branch = parts[1] ?? '';
+  if (branch !== '' && !isBranchName(branch)) {
+    return '❌ E_GH_BRANCH: странное имя ветки (буквы, цифры, . _ - /).';
+  }
 
   const client = new GitHubClient(deps.cfg.githubToken);
   try {
-    const runs = await client.latestRuns(repo, '', CI_RUNS);
-    return renderRuns(repo, runs);
+    const runs = await client.latestRuns(repo, branch, CI_RUNS);
+    return renderRuns(repo, runs, branch);
   } catch (e) {
     return ghError(e);
   }
@@ -226,6 +237,9 @@ export async function handleWatch(
   if (!isRepoSlug(repo)) return '❌ E_GH_SLUG: нужен формат owner/repo.';
 
   const branch = branchArg.trim();
+  if (branch !== '' && !isBranchName(branch)) {
+    return '❌ E_GH_BRANCH: странное имя ветки (буквы, цифры, . _ - /).';
+  }
   const { store } = deps;
 
   if (store.getCiWatch(chatId, repo)) {
@@ -244,7 +258,7 @@ export async function handleWatch(
     const run = runs[0];
     if (run) {
       seeded = ` Сейчас: ${emoji(runStatus(run))} ${runStatus(run)}`;
-      store.updateCiWatchState(repo, runStatus(run), run.id);
+      store.updateCiWatchState(chatId, repo, runStatus(run), run.id);
     }
   } catch {
     // no token / rate limit / bad repo: /watch still works, polling just starts cold.
