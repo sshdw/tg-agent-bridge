@@ -102,6 +102,12 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** Send plain text, splitting anything over the Telegram limit into several messages. */
+export async function sendLong(api: Api, chatId: number, text: string): Promise<void> {
+  if (text === '') return;
+  for (const chunk of splitMessage(text)) await api.sendMessage(chatId, chunk);
+}
+
 export async function savePhoto(
   api: Api,
   botToken: string,

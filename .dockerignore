@@ -1,0 +1,23 @@
+# Never bake secrets into the image — pass them with --env-file at run time.
+.env
+
+# Host artefacts: rebuilt inside the image.
+node_modules
+dist
+
+# Runtime state (chat DB, WAL sidecars, logs, per-chat sandboxes).
+data
+work
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+bot.log
+
+# Repo/tooling noise.
+.git
+.gitignore
+.workbuddy-ai
+docs
+README.md
+*.md

@@ -1,79 +1,228 @@
-# TG Agent Bridge — бот, совместимый с любым ИИ-агентом
+# TG Agent Bridge
 
-Мост: ты с телефона → Telegram → агент (OpenCode) на домашнем ПК. ПК включён — управляешь кодом удалённо.
-Транспорт Telegram → единый `IAgentProvider` → любой агент
-(Cursor / Cline / Hermes / WorkBuddy / OpenCode).
+Мост между тобой в Telegram и любым код-агентом (OpenCode / Cursor / Cline / Hermes / WorkBuddy), запущенным на домашнем ПК.
+Пишешь боту с телефона — агент работает на ПК в нужной папке, ответ стримится в чат.
 
-## Токен бота (нужно сделать тебе, 2 минуты)
+Смена агента = смена адаптера: ядро, Telegram-слой и БД не меняются.
 
-1. В Telegram открой **@BotFather** → `/newbot` → придумай имя и username (должен кончаться на `bot`, например `my_agent_bridge_bot`).
-2. BotFather выдаст токен вида `123:ABC...` → вставь его в `.env` как `BOT_TOKEN=...`.
-3. Свой id узнай у **@userinfobot** (пришлёт число) → вставь в `.env` как `ALLOWED_CHAT_IDS=...`.
-4. `npm run dev`, с телефона `/start` — бот ответит.
+---
 
-## Папка
+## Быстрый старт
 
-```
-tg-agent-bridge/
-  docs/
-    ARCHITECTURE.md      # архитектура (утвердить)
-    TZ.md                # ТЗ (утвердить)
-    TASK-BREAKDOWN.md    # 6 параллельных задач для саммона агентов
-    PROMPTS.md           # 3 готовых промпта для агента-инженера
-  .env.example
-  package.json           # минимальный скелет
-  tsconfig.json
-  Dockerfile
+```bash
+git clone https://github.com/sshdw/tg-agent-bridge.git
+cd tg-agent-bridge
+npm i
+cp .env.example .env      # заполнить BOT_TOKEN и ALLOWED_CHAT_IDS
+npm run dev
 ```
 
-## Архитектура (коротко)
+С телефона отправь боту `/start` — он ответит текущим агентом.
 
-1. **Telegram Layer** — `grammy`, long-polling. Только парсинг команд и стриминг ответов. Никакой бизнес-логики.
-2. **Core** — Router (команды), SessionStore (chat_id → agent, model, workdir), TaskQueue (SQLite, 1 задача = 1 запуск агента).
-3. **Agent Gateway** — единый интерфейс:
-   ```ts
-   interface IAgentProvider {
-     id: 'opencode' | 'cursor' | 'cline' | 'hermes' | 'workbuddy' | 'mock';
-     run(task: AgentTask, onEvent: (e: AgentEvent) => void): Promise<AgentResult>;
-     cancel(sessionId: string): Promise<void>;
-   }
-   ```
-   Каждый провайдер = тонкий адаптер поверх CLI/HTTP. Ядро не знает деталей агента.
-4. **Providers (приоритет):**
-   - `opencode` (основной) — `opencode run --format json` как subprocess, парсинг stdout → стрим в ТГ.
-   - `cursor` — `cursor-agent --print` subprocess.
-   - `cline` — `roo-code --task` / file-based очередь (у Cline нет стабильного headless API → адаптер через CLI).
-   - `hermes` / `workbuddy` — HTTP POST `/v1/agent/run` (токен из env, не из ТГ).
-5. **Безопасность:** allowlist команд, workdir на чат (`./work/<chat_id>`), секреты только в env/keyring, в логи и в ТГ ошибки без секретов/SQL.
-6. **Хранение:** SQLite (`better-sqlite3`): `sessions`, `tasks`. Миграции forward-only.
+### Токен и id (2 минуты)
 
-## Что утвердить (ответь номерами)
+1. Telegram → **@BotFather** → `/newbot` → получишь токен вида `123456:ABC...` → в `.env` как `BOT_TOKEN=...`.
+2. Свой chat id узнай у **@userinfobot** → в `.env` как `ALLOWED_CHAT_IDS=...`.
+3. `npm run dev` → `/start` с телефона.
 
-Смотри `docs/TZ.md` и `docs/ARCHITECTURE.md`. От тебя нужно:
-1. Стек: Node 20 + TS strict + grammy + SQLite — ок? Или Python/aiogram?
-2. Режим: личный бот (1 whitelist chat_id) или многопользовательский?
-3. Дефолтный агент: `opencode`? Дефолтная модель?
-4. Доступ к файлам: бот работает в фиксированной папке `./work` или имеет доступ к `D:\projects\nx`?
-5. Деплой: локально / Docker / VPS?
+> Бот личный: любой chat id, которого нет в `ALLOWED_CHAT_IDS`, молча игнорируется.
 
-## Вопросы — что ты хотел бы добавить (списком, ответь коротко)
+---
 
-1. Команды: `/ask /code /agent /model /status /cancel` — хватает? Нужны `/voice`, `/photo`, `/repo`?
-2. Стриминг: редактировать сообщение по ходу (как ChatGPT) или слать кусками?
-3. Контекст: помнить переписку в пределах чата (сколько сообщений: 20/50/безлимит)?
-4. Репозитории: клонировать по URL из ТГ (`/clone <url>`) или только локальная папка?
-5. Права: выполнять shell-команды агента без подтверждения или с `/approve`?
-6. Уведомления: слать результат только запросившему или в группу?
-7. Модели: переключать из ТГ (`/model gpt-5`) или фиксированная?
-8. Лимиты: max длина ответа, таймаут задачи (5/15/60 мин)?
-9. Логи: писать `bot.log` локально — ок?
-10. Токен бота уже есть (@BotFather)? Куда деплоим?
+## Требования
 
-## Следующий шаг (2–3 промпта до готовности)
+| Что | Версия |
+|---|---|
+| Node.js | 24.x (проверено на 24.16.0) |
+| npm | 10+ |
+| git | нужен для `/clone` |
+| Docker | опционально, для VPS |
 
-В `docs/PROMPTS.md` уже лежат 3 готовых промпта для твоего агента-инженера:
-- Промпт 1: скаффолд + Telegram Core + Queue (запуск `/start /ask` на mock-провайдере).
-- Промпт 2 (параллельно ×5): 5 провайдеров по `TASK-BREAKDOWN.md`.
-- Промпт 3: hardening + Docker + `npm run dev` smoke.
+`better-sqlite3` — нативный модуль. Если переключаешься на другую мажорную версию Node, пересобери его: `npm rebuild better-sqlite3`.
 
-Как ответишь на 5 пунктов «утвердить» + 10 вопросов — даю команду инженеру начинать с Промпта 1.
+---
+
+## Настройка `.env`
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `BOT_TOKEN` | — (**обязательно**) | токен от @BotFather |
+| `ALLOWED_CHAT_IDS` | — (**обязательно**) | id владельца, через запятую |
+| `DEFAULT_AGENT` | `opencode` | агент для новых чатов |
+| `DEFAULT_MODEL` | *(пусто)* | модель по умолчанию (пусто = дефолт провайдера) |
+| `TASK_TIMEOUT_MS` | `2700000` | таймаут задачи, 45 мин |
+| `WORK_ROOT` | `./work` | песочница: `./work/<chat_id>` |
+| `ALLOWED_ROOTS` | `./work` | разрешённые папки через `;` |
+| `AUTO_APPROVE` | `false` | `true` = shell без подтверждения |
+| `HISTORY_LIMIT` | `50` | сколько сообщений отдавать агенту как контекст |
+| `OPENCODE_BIN` | `opencode` | путь/имя бинарника |
+| `CURSOR_BIN` | `cursor-agent` | — |
+| `CLINE_BIN` | `roo-code` | — |
+| `HERMES_BASE_URL` / `HERMES_API_KEY` | *(пусто)* | HTTP-агент Hermes |
+| `WORKBUDDY_BASE_URL` / `WORKBUDDY_API_KEY` | *(пусто)* | HTTP-агент WorkBuddy |
+| `DB_PATH` | `./data/bridge.db` | файл SQLite |
+
+Секреты живут только в `.env` / `process.env`. Они не пишутся в БД, в логи и в сообщения об ошибках.
+
+---
+
+## Команды
+
+| Команда | Что делает |
+|---|---|
+| `/start` | приветствие + активный агент, модель, проект |
+| `/ask <текст>` | вопрос активному агенту (со стримингом) |
+| `/code <задача>` | то же, но с пометкой `mode: code` |
+| `/agent <id>` | сменить агента; без аргумента — список |
+| `/model <name>` | сменить модель; без аргумента — сброс |
+| `/project <имя\|путь>` | привязать чат к папке (только внутри `ALLOWED_ROOTS`) |
+| `/clone <https-url>` | склонировать репо в `WORK_ROOT/<name>` |
+| `/auto on\|off` | shell без спроса / только после `/approve` |
+| `/approve` | разрешить ожидающее действие агента |
+| `/new` | очистить историю чата |
+| `/status` | текущая задача + очередь |
+| `/cancel` | убить текущую задачу |
+| `/help` | список команд |
+
+Фото без команды — сохраняется в `<workdir>/inbox/` и прикладывается к следующему `/ask`.
+
+Каждый Telegram-чат = отдельная сессия: свой агент, модель, проект и история.
+
+---
+
+## Проекты и папки
+
+Бот может работать только в тех папках, которые ты явно разрешил в `ALLOWED_ROOTS` (через `;`):
+
+```env
+ALLOWED_ROOTS=./work;D:\projects\nx
+```
+
+- Без `/project` чат живёт в песочнице `./work/<chat_id>`.
+- `/clone https://github.com/user/repo` → клонирует в `./work/repo`, затем `/project repo`.
+- `/project D:\projects\nx` — привязать чат к существующей папке (должна быть внутри `ALLOWED_ROOTS`).
+- Выход наверх запрещён: путь проверяется через `path.resolve`.
+
+---
+
+## Агенты
+
+| id | Как работает | Что нужно |
+|---|---|---|
+| `opencode` | `opencode run <текст> --format json` (subprocess) | установленный `opencode`, авторизованный (`opencode auth list`) |
+| `cursor` | `cursor-agent --print <текст>` (subprocess) | бинарник `cursor-agent` |
+| `cline` | CLI `roo-code`; если бинарника нет — файловый адаптер `task.json`/`result.json` в `<workdir>/.bridge/` | либо бинарник, либо внешний обработчик очереди |
+| `hermes` | `POST {HERMES_BASE_URL}/v1/agent/run` (SSE/чанки) | `HERMES_BASE_URL` + `HERMES_API_KEY` |
+| `workbuddy` | `POST {WORKBUDDY_BASE_URL}/v1/agent/run` (SSE/чанки) | `WORKBUDDY_BASE_URL` + `WORKBUDDY_API_KEY` |
+| `mock` | эхо с задержкой | ничего — для тестов без агентов |
+
+Если провайдер не настроен (нет бинарника/ключа), бот присылает `⚙ Провайдер не настроен`, а не падает.
+
+---
+
+## Запуск
+
+### Разработка
+
+```bash
+npm run dev          # tsx, без сборки
+npx tsc --noEmit     # проверка типов
+```
+
+### Прод
+
+```bash
+npm run build        # tsc → dist/
+npm start            # node dist/index.js
+```
+
+Логи пишутся в stdout и в `bot.log` (без секретов).
+
+### Docker
+
+```bash
+docker build -t tg-agent-bridge .
+docker run -d --name bridge --restart unless-stopped \
+  --env-file .env \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/work:/app/work" \
+  tg-agent-bridge
+```
+
+Секреты передаются через `--env-file`, в образ не попадают (`.env` в `.dockerignore`).
+Тома нужны, чтобы история чата и файлы проектов пережили пересборку.
+
+> Внутри контейнера доступны только агенты, установленные в образе. Для CLI-агентов (`opencode`, `cursor`, `cline`) проще запускать на хосте, чем тащить их в образ; для HTTP-агентов (`hermes`, `workbuddy`) Docker подходит идеально.
+
+---
+
+## Архитектура
+
+Слои строго разделены, детали — в `docs/ARCHITECTURE.md`.
+
+| Слой | Папка | Можно | Нельзя |
+|---|---|---|---|
+| Telegram | `src/telegram/` | парсинг команд, форматирование, стриминг | бизнес-логика, вызов CLI |
+| Core | `src/core/` | router, sessions, queue, permissions, approvals | знать детали агента |
+| Gateway | `src/gateway/` | `types.ts`, `registry.ts`, `spawnRunner`, `fetchRunner` | хардкод флагов CLI |
+| Providers | `src/providers/` | 1 файл = 1 агент: `AgentTask → CLI/HTTP` | лезть в Telegram API |
+| Storage | `src/storage/` | SQLite, forward-only миграции | хранить токены |
+
+Контракт провайдера (`src/gateway/types.ts`):
+
+```ts
+interface IAgentProvider {
+  readonly id: AgentId;
+  run(task: AgentTask, onEvent: (e: AgentEvent) => void): Promise<AgentResult>;
+  cancel(sessionId: string): Promise<void>;
+}
+```
+
+Общие раннеры: `spawnRunner` (CLI: spawn, таймаут, kill-map по `sessionId`, построчный стрим, санитайз ошибок) и `fetchRunner` (HTTP: POST + Bearer, `AbortController`, потоковый разбор SSE).
+
+### Структура
+
+```
+src/
+  index.ts                 # composition root: config, store, register провайдеров, bot
+  config.ts                # env → Config
+  telegram/{bot,stream}.ts # grammy, whitelist, нарезка >4000, стрим-редактирование
+  core/{router,queue,sessions,permissions,approvals}.ts
+  gateway/{types,registry,spawnRunner,fetchRunner}.ts
+  providers/{opencode,cursor,cline,hermes,workbuddy,mock}.ts
+  storage/db.ts
+docs/                      # ARCHITECTURE.md, TZ.md, TASK-BREAKDOWN.md
+```
+
+---
+
+## Безопасность
+
+- **Whitelist** по `ALLOWED_CHAT_IDS`; чужой chat id → молчаливый игнор.
+- **Файлы**: агент работает только внутри `ALLOWED_ROOTS`; выход наверх блокируется.
+- **Секреты**: только `process.env`. Дочернему процессу агента переменные `BOT_TOKEN`, `HERMES_API_KEY`, `WORKBUDDY_API_KEY` не передаются.
+- **Ошибки**: наружу только коды (`E_AGENT_FAILED`, `E_TIMEOUT`, `E_NOT_CONFIGURED`, `E_PATH_DENIED`, `E_CANCELLED`) — без команд, ключей и SQL.
+- **Логи**: промпты и токены не пишутся; в debug — максимум 120 символов.
+- **Лимиты**: 45 мин на задачу, 4000 символов на сообщение (нарезка), 1 задача на чат одновременно.
+
+---
+
+## Диагностика
+
+| Симптом | Причина / что делать |
+|---|---|
+| Бот не отвечает на `/start` | процесс не запущен, либо твой chat id не в `ALLOWED_CHAT_IDS` |
+| `E_NO_TOKEN` при старте | не заполнен `BOT_TOKEN` в `.env` |
+| `NODE_MODULE_VERSION` при старте | `better-sqlite3` собран под другую версию Node → `npm rebuild better-sqlite3` |
+| `⚙ Провайдер не настроен` | нет бинарника (проверь `opencode --version`) или ключа для HTTP-агента |
+| `409 Conflict` в логах | запущено два экземпляра бота — оставь один |
+| Задача висит до таймаута | агент ждёт подтверждения внутри своего CLI; попробуй `/auto on` |
+
+---
+
+## Ограничения v0.1
+
+- Только текст и фото. Голос, inline-кнопки и вебхуки — v0.2.
+- Стриминг — живым редактированием одного сообщения (лимит Telegram на частоту правок).
+- `/approve` работает на уровне моста. CLI-агенты (`opencode`, `cursor`, `cline`) не отдают событие «разрешить команду» до её выполнения, поэтому для них `/auto off` означает «действует политика самого CLI», а не пошаговое подтверждение. Для HTTP-агентов подтверждение управляется на стороне сервера.
+- `cline` без установленного `roo-code` использует файловый адаптер: задание кладётся в `<workdir>/.bridge/task.json`, ответ ждётся в `result.json`.

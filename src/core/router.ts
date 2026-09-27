@@ -11,7 +11,7 @@ import { getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { Store } from '../storage/db.js';
-import { createStream, escapeHtml, savePhoto } from '../telegram/stream.js';
+import { createStream, escapeHtml, savePhoto, sendLong } from '../telegram/stream.js';
 
 export interface Deps {
   cfg: Config;
@@ -206,7 +206,7 @@ export function createResponder(bot: Bot): Responder {
   return {
     streamStart: (chatId) => createStream(bot.api, chatId),
     notify: async (chatId, text) => {
-      await bot.api.sendMessage(chatId, text);
+      await sendLong(bot.api, chatId, text);
     },
     askApproval: async (chatId, command) => {
       const { requestApproval } = await import('../core/approvals.js');
