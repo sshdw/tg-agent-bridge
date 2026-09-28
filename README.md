@@ -40,6 +40,18 @@ npm run dev
 
 `better-sqlite3` — нативный модуль. Если переключаешься на другую мажорную версию Node, пересобери его: `npm rebuild better-sqlite3`.
 
+Для голосовых сообщений (VOICE IN) нужен локальный whisper.cpp — ставь по желанию, без него бот просто отвечает `E_VOICE_NOT_CONFIGURED`. ffmpeg не требуется: whisper.cpp читает Telegram-овый `.oga` (OGG/Opus) напрямую.
+
+### Установка whisper.cpp (Windows)
+
+1. Скачай `whisper-bin-x64.zip` из [релиза whisper.cpp](https://github.com/ggml-org/whisper.cpp/releases) и распакуй — внутри папка `Release/` с `whisper-cli.exe` и `ggml-*.dll`.
+2. Скачай модель: `ggml-base.bin` (~148 МБ) с [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin) (`ggml-small.bin` точнее и медленнее, `ggml-tiny.bin` ~78 МБ).
+3. Пропиши в `.env` абсолютные пути (см. ниже).
+
+Важно: `.dll` должны лежать рядом с `whisper-cli.exe` — не переноси `.exe` в одиночку.
+
+Проверенная связка (сентябрь 2026): `whisper-bin-x64.zip` b5130 + `ggml-base.bin` (~148 МБ, мультиязычная, русский есть) в `D:\tools\whisper` — 11 с аудио распознаётся за ~2 с, WER 0% на эталоне `jfk.wav`.
+
 ---
 
 ## Настройка `.env`
@@ -59,6 +71,10 @@ npm run dev
 | `CURSOR_BIN` | `cursor-agent` | — |
 | `CLINE_BIN` | `roo-code` | — |
 | `HERMES_BASE_URL` / `HERMES_API_KEY` | *(пусто)* | HTTP-агент Hermes |
+| `WHISPER_BIN` | `whisper-cli` | путь к `whisper-cli.exe`; пусто/не найден = голос отключён |
+| `VOICE_MODEL_PATH` | *(пусто)* | путь к `ggml-*.bin`; пусто = голос отключён |
+| `VOICE_LANG` | `ru` | язык подсказкой (`-l`) для whisper.cpp |
+| `FFMPEG_BIN` | `ffmpeg` | только для нестандартных форматов; для `.oga` не нужен |
 | `DB_PATH` | `./data/bridge.db` | файл SQLite |
 
 Секреты живут только в `.env` / `process.env`. Они не пишутся в БД, в логи и в сообщения об ошибках.
@@ -81,9 +97,13 @@ npm run dev
 | `/new` | очистить историю чата |
 | `/status` | текущая задача + очередь |
 | `/cancel` | убить текущую задачу |
+| `/cost [day\|week]` | расходы за сутки/неделю из `tasks.cost_usd`; задачи без цены в сумму не входят, так и пишет |
+| `/update` | `git pull` + `npm i` + `npm run build` + `tsc`, затем перезапуск (двойное подтверждение кнопкой, только хост) |
 | `/help` | список команд |
 
 Фото без команды — сохраняется в `<workdir>/inbox/` и прикладывается к следующему `/ask`.
+
+Голосовое без команды — скачивается в `<workdir>/inbox/voice-<ts>.oga`, распознаётся локально через whisper.cpp и уходит в очередь как обычный `/ask` с пометкой `[voice]`. Распознанный текст бот присылает отдельным сообщением.
 
 Каждый Telegram-чат = отдельная сессия: свой агент, модель, проект и история.
 
@@ -151,6 +171,65 @@ docker run -d --name bridge --restart unless-stopped \
 Тома нужны, чтобы история чата и файлы проектов пережили пересборку.
 
 > Внутри контейнера доступны только агенты, установленные в образе. Для CLI-агентов (`opencode`, `cursor`, `cline`) проще запускать на хосте, чем тащить их в образ; для HTTP-агента (`hermes`) Docker подходит идеально.
+
+> `/update` в контейнере не работает (обновлятор — Windows `.cmd` для хоста). На VPS обновляйся через `git pull` + `docker build` + `docker run` заново.
+
+---
+
+## Автозапуск (Windows)
+
+Чтобы бот пережил перезагрузку и падение, есть задача планировщика «запуск при входе + рестарт при сбое»:
+
+```cmd
+scripts\install-autostart.cmd
+```
+
+Что делает: создаёт задачу `tg-agent-bridge` (текущий пользователь, триггер — вход в систему), которая запускает `scripts\run-bridge.cmd` → `npm run dev` в этой папке. При падении — 3 перезапуска с интервалом в минуту. Прав администратора не нужно.
+
+Проверка и удаление:
+
+```cmd
+schtasks /query /tn "tg-agent-bridge"
+schtasks /delete /tn "tg-agent-bridge" /f
+```
+
+Учти: планировщик запускает только один экземпляр (политика `IgnoreNew`). Второй `npm run dev` вручную даст `409 Conflict` в Telegram — убей сначала задачу (`schtasks /run` не нужен, просто не запускай второй).
+
+Проверка без перезагрузки (симуляция сбоя): убей процесс `node` в диспетчере задач — через минуту планировщик поднимет бота, а в личку придёт `🟢 я жив (v0.2, <sha>), прерванных задач: N` (stale `running` → `pending`, автозапуска старых задач нет — решение за владельцем).
+
+---
+
+## Oracle Always Free за 15 минут
+
+Переезд на бесплатный VPS, когда понадобится 24/7 без домашнего ПК. Миграции как таковой пока нет (история чата остаётся в локальной SQLite) — это инструкция «подними второго бота в облаке».
+
+1. Регистрация: нужен аккаунт Oracle Cloud (для проверки личности требуется карта, списаний на Always Free нет). Создай VM: образ **Ubuntu**, shape **VM.Standard.A1.Flex** (Ampere ARM, Always Free: до 4 OCPU / 24 ГБ RAM суммарно на аккаунт — бери 2 OCPU / 12 ГБ, хватит с запасом).
+2. В еписке сети (subnet) открой **исходящий** трафик (Telegram polling — только outbound HTTPS, входящие порты не нужны).
+3. На VM поставь Docker:
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   sudo usermod -aG docker ubuntu && newgrp docker
+   ```
+4. Склонируй репо и заполни `.env`:
+   ```bash
+   git clone https://github.com/sshdw/tg-agent-bridge.git
+   cd tg-agent-bridge
+   cp .env.example .env && nano .env   # BOT_TOKEN и ALLOWED_CHAT_IDS обязательны
+   mkdir -p data work
+   ```
+5. Запусти с авторестартом:
+   ```bash
+   docker build -t tg-agent-bridge .
+   docker run -d --name bridge --restart unless-stopped \
+     --env-file .env \
+     -v "$PWD/data:/app/data" \
+     -v "$PWD/work:/app/work" \
+     tg-agent-bridge
+   docker logs -f bridge
+   ```
+6. Проверка с телефона: `/start` отвечает — готово. Обновление там: `git pull && docker build -t tg-agent-bridge . && docker rm -f bridge` и снова `docker run …` из п. 5.
+
+Ограничения облака: в образе нет CLI-агентов — используй `hermes` (HTTP-агент) либо ставь нужные CLI в `Dockerfile` сам; голос (whisper.cpp) в облаке не заведётся без настройки — бот просто ответит `E_VOICE_NOT_CONFIGURED`. Два бота на одном токене (домашний + облачный) дадут `409 Conflict` — оставь один.
 
 ---
 

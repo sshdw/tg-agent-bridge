@@ -11,12 +11,21 @@ import type { AgentEvent, AgentResult, AgentTask } from './types.js';
  */
 
 /** Env vars that must never be inherited by a spawned agent process. */
-const SECRET_ENV_KEYS = ['BOT_TOKEN', 'HERMES_API_KEY'] as const;
+const SECRET_ENV_KEYS = [
+  'BOT_TOKEN',
+  'HERMES_API_KEY',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'GITHUB_PAT',
+  /** Git asks for these when /commit or /pr runs inside a child; they are ours. */
+  'GIT_ASKPASS',
+] as const;
 
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, // telegram bot token
   /\bsk-[A-Za-z0-9_-]{16,}\b/g, // openai-style key
-  /\bgh[opsu]_[A-Za-z0-9]{20,}\b/g, // github token
+  /\bgh[opsur]_[A-Za-z0-9]{20,}\b/g, // github token (classic, fine-grained, server, user, refresh)
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, // github fine-grained PAT
   /Bearer\s+[A-Za-z0-9._-]{16,}/gi, // bearer header
   /\b[A-Za-z0-9_-]{32,}\b/g, // long opaque secret
 ];
@@ -74,6 +83,17 @@ export interface SpawnSpec {
   env?: NodeJS.ProcessEnv;
   /** Maps one stdout line to a text delta. Return null to drop the line. Default: line + "\n". */
   parseLine?: (line: string) => string | null;
+  /**
+   * Side-channel for structured data hiding in the same stdout stream (session id,
+   * cost). Called for every line, before `parseLine`; never contributes to the reply.
+   */
+  parseMeta?: (line: string) => void;
+}
+
+/** Structured, non-prose facts a provider dug out of its own JSONL stream. */
+export interface SpawnMeta {
+  sessionId: string;
+  costUsd: number | null;
 }
 
 const defaultParse = (line: string): string => `${line}\n`;
@@ -81,6 +101,7 @@ const defaultParse = (line: string): string => `${line}\n`;
 /**
  * Run a CLI agent to completion.
  * Rejects with E_NOT_CONFIGURED (missing binary), E_TIMEOUT, E_CANCELLED or E_AGENT_FAILED.
+ * Resolves with the accumulated text plus any session id / cost the provider reported.
  */
 export function runSpawn(spec: SpawnSpec, onEvent: (e: AgentEvent) => void): Promise<AgentResult> {
   return new Promise<AgentResult>((resolve, reject) => {
@@ -104,6 +125,8 @@ export function runSpawn(spec: SpawnSpec, onEvent: (e: AgentEvent) => void): Pro
     let stdoutBuf = '';
     let stderrBuf = '';
     let text = '';
+    let sessionId = '';
+    let costUsd: number | null = null;
 
     const timer = setTimeout(() => {
       run.reason = 'timeout';
@@ -121,7 +144,30 @@ export function runSpawn(spec: SpawnSpec, onEvent: (e: AgentEvent) => void): Pro
 
     const parse = spec.parseLine ?? defaultParse;
 
+    /** Providers hand back facts through a mutable carrier so they need no state. */
+    const meta: SpawnMeta = {
+      get sessionId() {
+        return sessionId;
+      },
+      set sessionId(v: string) {
+        if (v !== '') sessionId = v;
+      },
+      get costUsd() {
+        return costUsd;
+      },
+      set costUsd(v: number | null) {
+        if (typeof v === 'number' && Number.isFinite(v)) costUsd = v;
+      },
+    };
+
     const emit = (line: string): void => {
+      if (spec.parseMeta) {
+        try {
+          spec.parseMeta.call(meta, line);
+        } catch {
+          // a malformed metadata line must never break the reply stream
+        }
+      }
       const delta = parse(line);
       if (delta === null || delta === '') return;
       text += delta;
@@ -157,7 +203,7 @@ export function runSpawn(spec: SpawnSpec, onEvent: (e: AgentEvent) => void): Pro
       settle(() => {
         if (run.reason === 'timeout') reject(new Error('E_TIMEOUT'));
         else if (run.reason === 'cancel') reject(new Error('E_CANCELLED'));
-        else if (code === 0) resolve({ text, exitCode: 0 });
+        else if (code === 0) resolve({ text, exitCode: 0, sessionId, costUsd });
         else reject(new Error(`E_AGENT_FAILED: exit ${code ?? 'signal'}${stderrBuf === '' ? '' : ` — ${sanitize(stderrBuf)}`}`));
       });
     });
@@ -176,9 +222,33 @@ export function isRunning(sessionId: string): boolean {
 }
 
 /**
+ * Every prompt that comes from Telegram is prefixed with this marker so agents and
+ * future log analysis can tell phone-originated turns apart from local ones.
+ */
+export const TELEGRAM_MARKER = '[via Telegram]';
+
+/**
+ * Appended to every Telegram-originated prompt. Keeps replies readable on a phone:
+ * short paragraphs, key points first, fenced code, no giant headings.
+ */
+export const TELEGRAM_SYSTEM_LINE =
+  'Reply concise and Telegram-friendly: short paragraphs, key points first, code in fenced blocks, no giant headers.';
+
+/** Prefix a user prompt with the Telegram marker and the output-style system line. */
+export function telegramify(prompt: string): string {
+  return `${TELEGRAM_MARKER} ${prompt}\n\n${TELEGRAM_SYSTEM_LINE}`;
+}
+
+/**
  * Flatten the recent transcript into one prompt for CLI agents.
  * The queue records the user message before dispatching, so the current prompt is
  * normally the last history entry — it is removed here to avoid sending it twice.
+ * Used as the fallback path when the provider cannot resume a real session.
+ *
+ * Every prompt this produces originates from Telegram, so the marker and the
+ * phone-friendly system line are applied here: providers that only call
+ * `composePrompt` (cursor, cline, hermes) then get the same decoration as opencode's
+ * resume path, without each provider re-implementing it.
  */
 export function composePrompt(task: AgentTask, maxChars = 12000): string {
   const hist = [...task.history];
@@ -197,7 +267,10 @@ export function composePrompt(task: AgentTask, maxChars = 12000): string {
     for (const m of hist) lines.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`);
     lines.push('');
   }
-  lines.push(task.prompt);
+  // The marker goes on the user turn itself; the system line closes the prompt.
+  lines.push(`${TELEGRAM_MARKER} ${task.prompt}`);
+  lines.push('');
+  lines.push(TELEGRAM_SYSTEM_LINE);
   const out = lines.join('\n');
   return out.length > maxChars ? out.slice(out.length - maxChars) : out;
 }
