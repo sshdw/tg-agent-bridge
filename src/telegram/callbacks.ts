@@ -5,7 +5,7 @@ import { AGENT_IDS } from '../config.js';
 import { resolveApproval } from '../core/approvals.js';
 import type { Responder } from '../core/queue.js';
 import { TaskQueue } from '../core/queue.js';
-import { getOrCreate, updateSession } from '../core/sessions.js';
+import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { Store } from '../storage/db.js';
@@ -158,7 +158,9 @@ export function registerCallbacks(bot: Bot, deps: CallbackDeps): void {
             await ctx.answerCallbackQuery({ text: 'Нет такого агента' });
             break;
           }
+          const prevAgent = deps.store.getSession(chatId)?.agent;
           updateSession(deps.store, chatId, { agent: payload as (typeof AGENT_IDS)[number] });
+          if (prevAgent !== undefined && prevAgent !== payload) dropAgentSession(deps.store, chatId);
           await ctx.answerCallbackQuery({ text: `Агент: ${payload}` });
           await ctx.reply(`Агент: ${payload}`);
           break;
@@ -181,7 +183,9 @@ export function registerCallbacks(bot: Bot, deps: CallbackDeps): void {
               break;
             }
           }
+          const prevProject = deps.store.getSession(chatId)?.project;
           updateSession(deps.store, chatId, { project: payload });
+          if (prevProject !== undefined && prevProject !== payload) dropAgentSession(deps.store, chatId);
           await ctx.answerCallbackQuery({ text: payload === '' ? 'Песочница' : `Проект: ${payload}` });
           await ctx.reply(payload === '' ? 'Проект: (песочница)' : `Проект: ${payload}`);
           break;

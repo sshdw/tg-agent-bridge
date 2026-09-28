@@ -19,7 +19,7 @@ import { TaskQueue } from '../core/queue.js';
 import { runExec } from '../core/exec.js';
 import { CODE_USAGE, registerPlanFlow, requestCode, tryPlanRework } from '../core/plan.js';
 import { PRESET_NAMES, applyPreset, type PresetName } from '../core/presets.js';
-import { getOrCreate, updateSession } from '../core/sessions.js';
+import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
 // [WAVE2-GITHUB] §1.6 — handlers live in the github layer so Core stays a command table.
 import { handleCi, handleCommit, handlePr, handleWatch } from '../github/commands.js';
@@ -325,7 +325,9 @@ export function registerRouter(bot: Bot, deps: Deps): void {
       return deps.io.notify(chatId, `Нет такого агента. Доступны: ${availableProviders().join(', ')}`);
     }
     try {
+      const prev = store.getSession(chatId)?.agent;
       updateSession(store, chatId, { agent: id as (typeof AGENT_IDS)[number] });
+      if (prev !== undefined && prev !== id) dropAgentSession(store, chatId);
       return deps.io.notify(chatId, `Агент: ${id}`);
     } catch {
       return deps.io.notify(chatId, '❌ E_AGENT_FAILED');
@@ -346,7 +348,9 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     if (p === '') return showProjectPicker(ctx, deps);
     try {
       resolveWorkdir(cfg, chatId, p);
+      const prev = store.getSession(chatId)?.project;
       updateSession(store, chatId, { project: p });
+      if (prev !== undefined && prev !== p) dropAgentSession(store, chatId);
       return deps.io.notify(chatId, `Проект: ${p}`);
     } catch {
       return deps.io.notify(chatId, '🔒 Папка вне разрешённых. Смотри ALLOWED_ROOTS в .env.');
@@ -387,6 +391,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   });
 
   bot.command('new', (ctx) => {
+    dropAgentSession(store, ctx.chat.id);
     store.clearMessages(ctx.chat.id);
     return deps.io.notify(ctx.chat.id, 'История очищена. Новый диалог.');
   });
