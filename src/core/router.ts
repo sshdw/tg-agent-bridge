@@ -17,7 +17,7 @@ import { COST_USAGE, formatCostReply, parseCostArg } from './cost.js';
 import { repoDir, versionHash } from './update.js';
 import { TaskQueue } from '../core/queue.js';
 import { runExec } from '../core/exec.js';
-import { CODE_USAGE, registerPlanFlow, requestCode, tryPlanRework } from '../core/plan.js';
+import { CODE_USAGE, requestCode, tryPlanRework } from '../core/plan.js';
 import { PRESET_NAMES, applyPreset, type PresetName } from '../core/presets.js';
 import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
 import { resolveWorkdir } from '../core/permissions.js';
@@ -280,7 +280,9 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('ask', (ctx) => ask(bot, deps, ctx.chat.id, arg(ctx.message?.text), 'ask'));
 
   // WAVE2/EXEC-BEGIN (/exec, /sys, plan-mode /code, preset commands)
-  registerPlanFlow(deps.queue, deps.io);
+  // NOTE: registerPlanFlow lives in index.ts (after the queue exists) —
+  // calling it here would read deps.queue before it is assigned. Keep this
+  // block registration-only; everything else reads deps lazily at call time.
 
   const codeLike = (
     ctx: { chat: { id: number }; message?: { text?: string } },

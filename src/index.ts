@@ -6,6 +6,7 @@ import { TaskQueue } from './core/queue.js';
 import type { Responder } from './core/queue.js';
 import type { Deps } from './core/router.js';
 import { createResponder } from './core/router.js';
+import { registerPlanFlow } from './core/plan.js';
 import { register } from './gateway/registry.js';
 import { ClineProvider } from './providers/cline.js';
 import { CursorProvider } from './providers/cursor.js';
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
   const bot = createBot(cfg, deps);
   deps.io = createResponder(bot);
   deps.queue = new TaskQueue(store, cfg, deps.io);
+  registerPlanFlow(deps.queue, deps.io);
 
   log(`bot up. version=${VERSION} sha=${shortSha()} default agent=${cfg.defaultAgent}, timeout=${cfg.taskTimeoutMs}ms`);
   log(`allowed chats: ${cfg.allowedChatIds.join(',') || '(none — bot will ignore everyone)'}`);
