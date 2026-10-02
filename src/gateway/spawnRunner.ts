@@ -234,9 +234,24 @@ export const TELEGRAM_MARKER = '[via Telegram]';
 export const TELEGRAM_SYSTEM_LINE =
   'Reply concise and Telegram-friendly: short paragraphs, key points first, code in fenced blocks, no giant headers.';
 
+/**
+ * The attachment protocol, documented where the agent actually reads instructions.
+ *
+ * Without it the only way a file reached the phone was the agent happening to type a
+ * path that `extractFileRefs` recognised — folklore, not a contract. With the marker
+ * the agent states intent, the queue strips the line from the visible reply and sends
+ * the file. Absolute paths and `..` are refused by the same containment guard `/get`
+ * uses, so the agent is told to use project-relative paths.
+ */
+export const ATTACH_PROTOCOL_LINE =
+  'To send a file to the phone, put [[attach:relative/path]] alone on its own line in your reply. ' +
+  'Use a path relative to the project directory (never absolute, never ../). ' +
+  'The marker line is removed from your visible answer; the file is uploaded. ' +
+  'Mentioning a path in prose does not send anything.';
+
 /** Prefix a user prompt with the Telegram marker and the output-style system line. */
 export function telegramify(prompt: string): string {
-  return `${TELEGRAM_MARKER} ${prompt}\n\n${TELEGRAM_SYSTEM_LINE}`;
+  return `${TELEGRAM_MARKER} ${prompt}\n\n${TELEGRAM_SYSTEM_LINE}\n${ATTACH_PROTOCOL_LINE}`;
 }
 
 /**
@@ -271,6 +286,7 @@ export function composePrompt(task: AgentTask, maxChars = 12000): string {
   lines.push(`${TELEGRAM_MARKER} ${task.prompt}`);
   lines.push('');
   lines.push(TELEGRAM_SYSTEM_LINE);
+  lines.push(ATTACH_PROTOCOL_LINE);
   const out = lines.join('\n');
   return out.length > maxChars ? out.slice(out.length - maxChars) : out;
 }

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { InputFile, type Bot } from 'grammy';
+import { type Bot } from 'grammy';
 import type { Config } from '../config.js';
 import { AGENT_IDS } from '../config.js';
 import { hasApproval, resolveApproval } from '../core/approvals.js';
@@ -9,7 +9,10 @@ import {
   displayName,
   errorCode,
   inboxFilename,
+  listDir,
+  outboundCapFor,
   outboundErrorMessage,
+  resolveOutboundDir,
   resolveOutboundFile,
 } from '../core/files.js';
 import type { Responder } from '../core/queue.js';
@@ -25,7 +28,8 @@ import { resolveWorkdir } from '../core/permissions.js';
 import { handleCi, handleCommit, handlePr, handleWatch } from '../github/commands.js';
 import { availableProviders } from '../gateway/registry.js';
 import type { MsgRow, Store } from '../storage/db.js';
-import { createStream, escapeHtml, saveInboundFile, sendLong } from '../telegram/stream.js';
+import { createStream, escapeHtml, saveInboundFile, sendMarkdown } from '../telegram/stream.js';
+import { sendOutboundFile } from '../telegram/outbound.js';
 import {
   approvalKeyboard,
   registerCallbacks,
@@ -38,6 +42,7 @@ import { runSys } from './sys.js';
 import { updateConfirmKeyboard } from '../telegram/keyboard.js';
 import { clear } from '../telegram/nonce.js';
 import { transcribeVoice } from '../voice/index.js';
+import { log } from '../log.js';
 
 export interface Deps {
   cfg: Config;
@@ -129,16 +134,82 @@ async function receiveInboundFile(
   );
 }
 
-/** Resolve the requested path inside the chat workdir and send it as a document. */
+/**
+ * `/get <path>` — send one file from the chat workdir.
+ *
+ * The path is resolved by `resolveOutboundFile` (the one containment guard) with the
+ * cap that matches the file's kind, so an oversized image is refused up front instead
+ * of after the upload. Routing to a photo or a document is `sendOutboundFile`'s job.
+ */
 async function sendRequestedFile(deps: Deps, chatId: number, requested: string): Promise<void> {
   const s = getOrCreate(deps.store, deps.cfg, chatId);
   const workdir = resolveWorkdir(deps.cfg, chatId, s.project);
+  const cap = outboundCapFor(requested);
   try {
-    const { abs } = resolveOutboundFile(workdir, requested);
-    await requireBot().api.sendDocument(chatId, new InputFile(abs), {});
+    const { abs } = resolveOutboundFile(workdir, requested, cap);
+    await sendOutboundFile(requireBot().api, chatId, abs);
+  } catch (e) {
+    await deps.io.notify(chatId, outboundErrorMessage(errorCode(e), cap));
+  }
+}
+
+/** Human-readable byte size for `/files`. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1).replace(/\.0$/, '')} КБ`;
+  return `${(n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} МБ`;
+}
+
+/**
+ * `/files [subdir]` — what can be sent from the chat workdir.
+ *
+ * Reuses `resolveWorkdir` for the base and `resolveOutboundDir` for the subdir, so a
+ * subdir argument is contained by exactly the rule `/get` and `[[attach:…]]` use. Names
+ * go inside backticks: a filename is untrusted text and must read as literal text.
+ */
+async function listWorkdirFiles(deps: Deps, chatId: number, subdir: string): Promise<void> {
+  const s = getOrCreate(deps.store, deps.cfg, chatId);
+  let workdir: string;
+  try {
+    workdir = resolveWorkdir(deps.cfg, chatId, s.project);
+  } catch {
+    await deps.io.notify(chatId, DENIED);
+    return;
+  }
+  let dir = workdir;
+  let where = '';
+  if (subdir !== '') {
+    try {
+      const r = resolveOutboundDir(workdir, subdir);
+      dir = r.abs;
+      where = r.rel;
+    } catch (e) {
+      await deps.io.notify(chatId, outboundErrorMessage(errorCode(e)));
+      return;
+    }
+  }
+  let rows;
+  try {
+    rows = listDir(dir, workdir);
   } catch (e) {
     await deps.io.notify(chatId, outboundErrorMessage(errorCode(e)));
+    return;
   }
+  if (rows.entries.length === 0) {
+    await deps.io.notify(chatId, `📁 ${where === '' ? 'корень проекта' : where}: пусто.`);
+    return;
+  }
+  const lines = rows.entries.map((e) => {
+    const name = `\`${e.name.replace(/`/g, "'")}\``;
+    return e.isDir
+      ? `- 📁 ${name}/`
+      : `- ${name} — ${formatBytes(e.size)} — ${new Date(e.mtimeMs).toISOString().replace('T', ' ').slice(5, 16)}`;
+  });
+  const tail =
+    rows.total > rows.entries.length
+      ? `\n_Показано ${rows.entries.length} из ${rows.total}._`
+      : '\n/get <путь> — прислать. /files <папка> — список.';
+  await deps.io.notify(chatId, `📁 ${where === '' ? 'корень проекта' : where}\n${lines.join('\n')}${tail}`);
 }
 
 /** `/find <text>` over this chat's full history, newest first, plain-text safe. */
@@ -273,7 +344,7 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('help', (ctx) => {
     return deps.io.notify(
       ctx.chat.id,
-      `/ask <текст> — вопрос агенту\n/code <задача> — план, запуск после одобрения\n/review • /test • /fix <симптом> — пресеты /code\n/exec <команда> — shell в папке проекта\n/sys — CPU/RAM/диск\n/get <файл> — прислать файл из папки проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить\n/cost [day|week] — траты агента\n/update — обновить бота (двойное подтверждение)`,
+      `/ask <текст> — вопрос агенту\n/code <задача> — план, запуск после одобрения\n/review • /test • /fix <симптом> — пресеты /code\n/exec <команда> — shell в папке проекта\n/sys — CPU/RAM/диск\n/get <файл> — прислать файл из папки проекта\n/files [папка] — что есть в папке проекта\n/find <текст> — поиск по истории\n/agent [id] — сменить агента, без аргумента — кнопки (${availableProviders().join(', ')})\n/model [name] — сменить модель, без аргумента — кнопки\n/project [name] — папка проекта, без аргумента — кнопки\n/clone <url> — склонировать репо\n/commit <текст> — git add -A + commit + push\n/pr [заголовок] — запушить ветку и открыть PR\n/ci <owner/repo> [ветка] — последние запуски Actions\n/watch <owner/repo> [ветка] — вкл/выкл уведомления о CI\n/auto on|off — shell без спроса/с вопросом\n/approve — разрешить команду агента (или кнопка)\n/new — очистить историю\n/status — очередь\n/cancel — отменить\n/cost [day|week] — траты агента\n/update — обновить бота (двойное подтверждение)`,
     );
   });
 
@@ -361,9 +432,11 @@ export function registerRouter(bot: Bot, deps: Deps): void {
 
   bot.command('clone', (ctx) => runClone(deps, ctx.chat.id, arg(ctx.message?.text)));
 
-  // WAVE2/FILES-BEGIN — /get and /find registrations. Delimited so
+  // WAVE2/FILES-BEGIN — /get, /files and /find registrations. Delimited so
   // sibling router additions merge without touching these lines.
   bot.command('get', (ctx) => sendRequestedFile(deps, ctx.chat.id, arg(ctx.message?.text)));
+
+  bot.command('files', (ctx) => listWorkdirFiles(deps, ctx.chat.id, arg(ctx.message?.text)));
 
   bot.command('find', (ctx) => {
     const chatId = ctx.chat.id;
@@ -531,8 +604,11 @@ function params(cfg: Config, chatId: number, project: string): string {
 export function createResponder(bot: Bot): Responder {
   return {
     streamStart: (chatId) => createStream(bot.api, chatId),
+    // Every non-streaming reply goes out as rendered Telegram HTML. The old path sent
+    // the raw markdown with no parse_mode, which is why /help and /find arrived on the
+    // owner's phone as literal `**bold**` and ``` fences.
     notify: async (chatId, text) => {
-      await sendLong(bot.api, chatId, text);
+      await sendMarkdown(bot.api, chatId, text);
     },
     askApproval: async (chatId, command) => {
       const { requestApproval } = await import('../core/approvals.js');
@@ -541,17 +617,20 @@ export function createResponder(bot: Bot): Responder {
       const pending = requestApproval(chatId);
       await bot.api.sendMessage(
         chatId,
-        `Агент хочет выполнить:\n<code>${escapeHtml(command)}</code>\n\nНажми кнопку или /approve — разрешить, /cancel — отклонить`,
+        `Агент хочет выполнить:\n<pre>${escapeHtml(command)}</pre>\n\nНажми кнопку или /approve — разрешить, /cancel — отклонить`,
         { parse_mode: 'HTML', reply_markup: approvalKeyboard(chatId) },
       );
       return pending;
     },
-    async attachFiles(chatId, paths) {
+    async attachFiles(chatId, paths, caption) {
       for (const abs of paths) {
         try {
-          await bot.api.sendDocument(chatId, new InputFile(abs), {});
-        } catch {
-          // a single failed upload must not stop the rest
+          // Images arrive inline as photos with a caption; the rest stay documents.
+          await sendOutboundFile(bot.api, chatId, abs, caption ?? '');
+        } catch (e) {
+          // a single failed upload must not stop the rest, but it must be visible in the
+          // log: a silently missing file is indistinguishable from a broken bot.
+          log(`attach ${abs}: ${errorCode(e)}`);
         }
       }
     },
