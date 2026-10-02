@@ -230,9 +230,16 @@ export const TELEGRAM_MARKER = '[via Telegram]';
 /**
  * Appended to every Telegram-originated prompt. Keeps replies readable on a phone:
  * short paragraphs, key points first, fenced code, no giant headings.
+ *
+ * The no-tables rule is not cosmetic: Telegram's HTML mode has no table markup, so a
+ * pipe table degrades into a wrapped wall of `|` characters on a narrow screen. The
+ * renderer does convert tables it recognises (see `renderTable` in
+ * `telegram/markdown.ts`), but it has to guess where a borderless table ends, so
+ * asking for a list removes the guesswork entirely.
  */
 export const TELEGRAM_SYSTEM_LINE =
-  'Reply concise and Telegram-friendly: short paragraphs, key points first, code in fenced blocks, no giant headers.';
+  'Reply concise and Telegram-friendly: short paragraphs, key points first, code in fenced blocks, no giant headers. ' +
+  'Never use markdown tables — Telegram cannot render them; use a bullet list with "Name: value" lines instead.';
 
 /**
  * The attachment protocol, documented where the agent actually reads instructions.

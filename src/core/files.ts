@@ -85,9 +85,16 @@ export interface OutboundFile {
  * True when `rel` (a `relative(base, abs)` result) climbs out of `base`.
  * Segment-aware: a literal dirname like `..foo` starts with two dots but stays
  * inside, so only an exact `..` segment counts.
+ *
+ * `rel === ''` means the target IS `base` — that is containment, not escape. It
+ * happens whenever the requested path is `.` or `./`, which is how an owner
+ * naturally asks for "the project root" from `/get .` or `/files .`. Callers
+ * then apply their own kind check (`isFile()` / `isDirectory()`), so allowing it
+ * here cannot widen access; rejecting it only produced a bogus "папка вне
+ * разрешённых".
  */
 function escapesBase(rel: string): boolean {
-  return rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
 /**

@@ -95,11 +95,26 @@ function splitFences(escaped: string): Block[] {
   return blocks;
 }
 
-/** Bullet / numbered list and heading handling, one line at a time. */
+/** Bullet / numbered list, table and heading handling, one line at a time. */
 function inlineBlocks(text: string): string {
   const lines = text.split('\n');
   const out: string[] = [];
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+
+    // Pipe table: either a proper one (`| a | b |` over a `---|---|` alignment row)
+    // or a borderless one — several consecutive pipe-separated lines with a stable
+    // cell count and no alignment row. Models emit borderless tables constantly
+    // (the owner's model-comparison dump was exactly that), and on a phone they are
+    // unreadable as raw pipes, so both shapes go through the same renderer.
+    const isDelimited = isTableDelimiter(lines[i + 1]);
+    const run = isDelimited ? tableRunFrom(lines, i, true) : borderlessRunFrom(lines, i);
+    if (run !== null && run.header.length > 1 && (isDelimited ? run.headerCells > 1 : true)) {
+      out.push(renderTable(run.header, run.body, isDelimited));
+      i = run.endIndex;
+      continue;
+    }
+
     // Heading: 1-6 `#` followed by a space -> bold (Telegram has no <hN>).
     const h = /^[ \t]{0,3}(#{1,6})[ \t]+(.+)$/.exec(line);
     if (h !== null) {
@@ -122,6 +137,152 @@ function inlineBlocks(text: string): string {
   }
   return out.join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// Pipe tables
+// ---------------------------------------------------------------------------
+
+/** Rows rendered before the block is cut, so a 200-row dump cannot flood a phone. */
+const TABLE_ROW_CAP = 40;
+
+/** `| --- | :--: |` — the alignment row that marks a pipe table's second line. */
+const TABLE_DELIM_RE = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+/** At least two cells and at least one `-`, so ordinary prose is never a table. */
+function isTableDelimiter(line: string | undefined): boolean {
+  if (line === undefined) return false;
+  const t = line.trim();
+  if (!t.includes('-')) return false;
+  if (!TABLE_DELIM_RE.test(t)) return false;
+  return splitRow(t).length > 1;
+}
+
+/** A body row of the table currently being consumed: contains a real cell separator. */
+function isTableRow(line: string): boolean {
+  return line.includes('|') && splitRow(line).length > 1;
+}
+
+/** A parsed table: header cells, raw body lines, and the last line it consumed. */
+interface TableRun {
+  header: string[];
+  body: string[];
+  endIndex: number;
+  headerCells: number;
+}
+
+/** Proper table: header at `start`, alignment row at `start + 1`, body from `start + 2`. */
+function tableRunFrom(lines: string[], start: number, _delimited: boolean): TableRun | null {
+  const header = splitRow(lines[start] ?? '');
+  const body: string[] = [];
+  let j = start + 2;
+  while (j < lines.length && isTableRow(lines[j] ?? '')) {
+    body.push(lines[j] ?? '');
+    j += 1;
+  }
+  return { header, body, endIndex: j - 1, headerCells: header.length };
+}
+
+/**
+ * Borderless table: no alignment row, so the shape is inferred.
+ *
+ * Requires at least two body lines below the header and a cell count that stays
+ * constant across the whole run. That is what keeps prose safe — a sentence with
+ * one stray `|`, a bullet, or a stray pair of pipes on two consecutive lines
+ * fails the width-stability test and stays literal text. Blank lines end the run,
+ * so a table is never glued to the paragraph after it.
+ */
+function borderlessRunFrom(lines: string[], start: number): TableRun | null {
+  const header = splitRow(lines[start] ?? '');
+  const width = header.length;
+  if (width < 2) return null;
+
+  const body: string[] = [];
+  let j = start + 1;
+  while (j < lines.length) {
+    const line = lines[j] ?? '';
+    if (line.trim() === '') break;
+    const cells = splitRow(line);
+    // A heading or bullet right after the header means this was never a table.
+    if (cells.length !== width) break;
+    if (/^[ \t]{0,3}(#{1,6})[ \t]/.test(line) || /^[ \t]*[-*+][ \t]+/.test(line)) break;
+    body.push(line);
+    j += 1;
+  }
+  if (body.length < 2) return null;
+  return { header, body, endIndex: j - 1, headerCells: width };
+}
+
+/**
+ * Split one pipe-table row into trimmed cells.
+ *
+ * A `\|` inside a cell is a literal pipe (markdown's own escape) and must not
+ * split the row; it is unwrapped here so the cell reads correctly downstream.
+ * The leading and trailing `|` of `| a | b |` produce empty edge cells, which are
+ * dropped — otherwise every table would gain two phantom columns.
+ */
+function splitRow(line: string): string[] {
+  const cells: string[] = [];
+  let cur = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '\\' && line[i + 1] === '|') {
+      cur += '|';
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      cells.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch ?? '';
+  }
+  cells.push(cur);
+  const trimmed = cells.map((c) => c.trim());
+  while (trimmed.length > 0 && trimmed[0] === '') trimmed.shift();
+  while (trimmed.length > 0 && trimmed[trimmed.length - 1] === '') trimmed.pop();
+  return trimmed;
+}
+
+/**
+ * Render a pipe table as a phone-readable block.
+ *
+ * Shape: the header becomes one bold legend line naming the columns, then one
+ * line per row. Two-column tables read best as `key: value`; wider ones keep the
+ * first cell bold and join the rest with ` · `, which survives a narrow screen
+ * where an aligned monospace grid does not. Empty cells are dropped so a sparse
+ * table does not trail separators.
+ */
+function renderTable(header: string[], bodyLines: string[], _delimited: boolean): string {
+  const cols = header.length;
+  const rows = bodyLines.slice(0, TABLE_ROW_CAP).map(splitRow);
+  const legend = header.filter((c) => c !== '').map((c) => inline(c)).join(' · ');
+
+  const body: string[] = [];
+  for (const cells of rows) {
+    if (cols <= 2) {
+      const key = cells[0] ?? '';
+      const value = cells.slice(1).join(' · ').trim();
+      if (key === '' && value === '') continue;
+      const k = key === '' ? '' : `<b>${inline(key)}</b>`;
+      body.push(value === '' ? k : `${k}${key === '' ? '' : ': '}${inline(value)}`);
+      continue;
+    }
+    const key = cells[0] ?? '';
+    const rest = cells.slice(1).filter((c) => c !== '').map((c) => inline(c));
+    const head = key === '' ? '' : `<b>${inline(key)}</b>`;
+    const line = [head, ...rest].filter((s) => s !== '').join(' — ');
+    if (line !== '') body.push(line);
+  }
+
+  const out: string[] = [];
+  if (legend !== '') out.push(`<b>${legend}</b>`);
+  out.push(...body);
+  const dropped = bodyLines.length - rows.length;
+  if (dropped > 0) out.push(`<i>… ещё ${dropped} строк</i>`);
+  return out.join('\n');
+}
+
 
 /** Inline markup within a single non-code line / accumulated text. */
 function inline(text: string): string {
