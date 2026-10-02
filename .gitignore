@@ -8,4 +8,5 @@ data/
 *.db-wal
 *.db-shm
 bot.log
+logs/
 .workbuddy-ai/
