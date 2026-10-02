@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentResult, AgentTask, IAgentProvider } from '../gateway/types.js';
 import type { SpawnMeta } from '../gateway/spawnRunner.js';
 import {
+  ATTACH_PROTOCOL_LINE,
   cancelSpawn,
   composePrompt,
   runSpawn,
@@ -112,11 +113,12 @@ export class OpenCodeProvider implements IAgentProvider {
 
   /**
    * Prefix the prompt so a resumed session — which skips history injection — still
-   * sees the Telegram marker and the phone-friendly output instruction.
+   * sees the Telegram marker, the phone-friendly output instruction and the
+   * `[[attach:…]]` protocol.
    */
   private decorate(prompt: string): string {
     if (prompt.includes(TELEGRAM_MARKER)) return prompt;
-    return `${TELEGRAM_MARKER} ${prompt}\n\n${TELEGRAM_SYSTEM_LINE}`;
+    return `${TELEGRAM_MARKER} ${prompt}\n\n${TELEGRAM_SYSTEM_LINE}\n${ATTACH_PROTOCOL_LINE}`;
   }
 
   async cancel(sessionId: string): Promise<void> {

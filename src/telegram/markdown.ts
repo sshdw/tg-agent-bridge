@@ -264,13 +264,294 @@ function single(text: string, marker: string, tag: string): string {
   return out;
 }
 
+/**
+ * Force the tag stream to be properly nested and balanced.
+ *
+ * The emphasis passes above are deliberately simple, and on pathological input
+ * (`*** ** *`) they can emit crossed tags — `<b><i>x</b></i>`. Telegram rejects that
+ * with "can't parse entities", which the send path used to answer by silently
+ * re-sending the raw markdown: the owner's literal `**bold**`. Repairing the nesting
+ * here keeps the guarantee the module documents: the output is always valid.
+ *
+ * Only tags this module writes can appear (input `<` is escaped to `&lt;` first), so
+ * the walk cannot be fooled into treating user text as markup.
+ */
+function balanceTags(html: string): string {
+  const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^<>]*?)?)>/g;
+  const stack: string[] = [];
+  const out: string[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    out.push(html.slice(last, m.index));
+    last = m.index + m[0].length;
+    const tag = (m[2] ?? '').toLowerCase();
+    if (m[1] === '/') {
+      const depth = stack.lastIndexOf(tag);
+      if (depth === -1) continue; // stray closer: drop it, the stack stays valid
+      // Close everything opened inside `tag` first, then `tag` itself.
+      for (let i = stack.length - 1; i >= depth; i -= 1) out.push(`</${stack[i] ?? ''}>`);
+      stack.length = depth;
+      continue;
+    }
+    stack.push(tag);
+    out.push(m[0]);
+  }
+  out.push(html.slice(last));
+  for (let i = stack.length - 1; i >= 0; i -= 1) out.push(`</${stack[i] ?? ''}>`);
+  return out.join('');
+}
+
 /** Convert markdown to valid, balanced Telegram HTML. */
 export function markdownToHtml(md: string): string {
   if (md === '') return '';
   const escaped = escapeText(md);
-  return splitFences(escaped)
+  const html = splitFences(escaped)
     .map((b) => b.html)
     .join('\n');
+  return balanceTags(html);
+}
+
+/**
+ * Render markdown, tolerating a converter failure.
+ *
+ * The converter is total (it never throws on input), but a defensive escape keeps
+ * a future change from taking down a reply: an escaped string is always valid
+ * Telegram HTML and always renders as the literal text it came from.
+ */
+export function renderHtml(md: string): string {
+  try {
+    return markdownToHtml(md);
+  } catch {
+    return escapeHtml(md);
+  }
+}
+
+/** Telegram's hard limit on `message_text`, in characters. */
+export const TELEGRAM_TEXT_LIMIT = 4096;
+
+/**
+ * Rendered-HTML budget per message: the Telegram limit minus a margin.
+ *
+ * The budget applies to the RENDERED string, never to the markdown source: escaping
+ * expands text (`&` -> `&amp;`, 1 char -> 5) and every tag adds bytes, so a source
+ * budget of 4000 routinely renders past 4096 and Telegram rejects the message. The
+ * margin also absorbs CRLF/Unicode surprises in Telegram's own length check.
+ */
+export const RENDER_BUDGET = TELEGRAM_TEXT_LIMIT - 296;
+
+/** Smallest budget the halving fallback in the send path will ever use. */
+export const MIN_RENDER_BUDGET = 700;
+
+/** One indivisible piece of markdown plus the length of its rendered HTML. */
+interface Unit {
+  /** Markdown source. */
+  md: string;
+  /** `renderHtml(md).length` — the real cost of this unit on the wire. */
+  rendered: number;
+}
+
+function unit(md: string): Unit {
+  return { md, rendered: renderHtml(md).length };
+}
+
+interface FenceState {
+  char: string;
+  len: number;
+  lang: string;
+}
+
+function isFenceCloseLine(line: string, fence: FenceState): boolean {
+  return new RegExp(`^[ \\t]{0,3}\\${fence.char}{${fence.len},}[ \\t]*$`).test(line);
+}
+
+/**
+ * Cost of one slice on the wire. Text is measured after rendering (markup may add
+ * bytes); fence content is measured after escaping only (it is emitted verbatim
+ * inside `<pre><code>`), which is why the fence path passes its own function.
+ */
+type CostFn = (slice: string) => number;
+
+const renderedCost: CostFn = (slice) => renderHtml(slice).length;
+const escapedCost: CostFn = (slice) => escapeHtml(slice).length;
+
+/**
+ * Cut one markdown source into pieces that each cost at most `budget`.
+ *
+ * Binary search on the slice length, so a pathological single line (a 200 KB minified
+ * bundle, a base64 blob) splits in O(log n) cost evaluations per piece instead of one
+ * per character.
+ */
+function sliceToBudget(md: string, budget: number, cost: CostFn = renderedCost): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < md.length) {
+    let lo = i + 1;
+    let hi = md.length;
+    let best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (cost(md.slice(i, mid)) <= budget) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    // A budget below the cost of one character cannot be honoured (only reachable with
+    // a hand-made tiny budget): emit the character so progress is still guaranteed.
+    const end = best === -1 ? Math.min(i + 1, md.length) : best;
+    out.push(md.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
+/**
+ * One fenced block, split into as many independently valid fenced blocks as the
+ * budget needs. Every piece opens and closes the fence itself, so no piece ends
+ * mid-block and no tag ever spans two pieces.
+ *
+ * Cost model is exact: a piece renders as `<pre><code …>` + escaped content joined by
+ * newlines + `</code></pre>`, and the content is emitted verbatim.
+ */
+function fenceUnits(openLine: string, body: string[], fence: FenceState, budget: number): Unit[] {
+  const closeLine = fence.char.repeat(fence.len);
+  const asPiece = (content: string[]): Unit => unit([openLine, ...content, closeLine].join('\n'));
+  const whole = asPiece(body);
+  if (whole.rendered <= budget) return [whole];
+
+  // Rendered cost of an empty block with this fence marker and language hint.
+  const overhead = unit([openLine, '', closeLine].join('\n')).rendered;
+  const out: Unit[] = [];
+  let group: string[] = [];
+  let cost = overhead;
+
+  const flushGroup = (): void => {
+    if (group.length === 0) return;
+    out.push(asPiece(group));
+    group = [];
+    cost = overhead;
+  };
+
+  for (const line of body) {
+    const lineCost = escapedCost(line) + 1;
+    if (overhead + lineCost > budget) {
+      // This single line cannot fit inside a fence of its own: slice the raw line and
+      // give every slice its own complete fence.
+      flushGroup();
+      for (const piece of sliceToBudget(line, budget - overhead - 1, escapedCost)) {
+        out.push(asPiece([piece]));
+      }
+      continue;
+    }
+    if (cost + lineCost > budget) flushGroup();
+    group.push(line);
+    cost += lineCost;
+  }
+  flushGroup();
+  return out;
+}
+
+/**
+ * Split markdown into fence-aware units: one unit per text line, one unit per
+ * (possibly re-opened) fenced block.
+ *
+ * Text units never contain a fence marker — the fence state machine below consumes
+ * them — so a text unit renders independently of its neighbours and emphasis can
+ * never pair across a chunk boundary.
+ */
+function toUnits(md: string, budget: number): Unit[] {
+  const lines = md.split('\n');
+  const units: Unit[] = [];
+  let fence: FenceState | null = null;
+  let openLine = '';
+  let body: string[] = [];
+
+  const flushFence = (): void => {
+    if (fence === null) return;
+    units.push(...fenceUnits(openLine, body, fence, budget));
+    fence = null;
+    body = [];
+    openLine = '';
+  };
+
+  for (const line of lines) {
+    if (fence === null) {
+      const m: RegExpExecArray | null = FENCE_RE.exec(line);
+      if (m !== null) {
+        const marker: string = m[2] ?? '```';
+        fence = { char: marker[0] ?? '`', len: marker.length, lang: m[3] ?? '' };
+        openLine = line;
+        body = [];
+        continue;
+      }
+      const u = unit(line);
+      if (u.rendered <= budget) units.push(u);
+      else for (const piece of sliceToBudget(line, budget)) units.push(unit(piece));
+      continue;
+    }
+    if (isFenceCloseLine(line, fence)) {
+      flushFence();
+      continue;
+    }
+    body.push(line);
+  }
+  // An unclosed fence at EOF still becomes a complete fenced unit: the owner sees the
+  // code, and the closing marker the converter omits is added back here.
+  flushFence();
+  return units;
+}
+
+/**
+ * Render markdown to a list of Telegram messages.
+ *
+ * The length budget applies to the RENDERED HTML, which is what Telegram counts.
+ * Guarantees, for every returned element:
+ *   - `renderHtml(el) === el` and `el.length <= budget`;
+ *   - the element is independently valid Telegram HTML with balanced tags — no tag
+ *     ever spans two elements, because every element is rendered on its own;
+ *   - every fenced block inside it is closed, because fences are cut as whole blocks
+ *     and a cut block is re-opened with the same marker and language hint.
+ *
+ * The join is the exact inverse of rendering one element at a time, which is why the
+ * per-element output can be measured before anything is sent.
+ */
+export function renderHtmlChunks(md: string, budget: number = RENDER_BUDGET): string[] {
+  if (md === '') return [];
+  const units = toUnits(md, budget);
+  const out: string[] = [];
+  let pending: Unit[] = [];
+  let est = 0;
+
+  const flush = (): void => {
+    if (pending.length === 0) return;
+    const md = pending.map((u) => u.md).join('\n');
+    let html = renderHtml(md);
+    // The estimate sums per-unit renders, which can undercount when markup would have
+    // paired across lines. Re-render exactly and drop trailing units until it fits.
+    while (html.length > budget && pending.length > 1) {
+      pending.pop();
+      html = renderHtml(pending.map((u) => u.md).join('\n'));
+    }
+    if (html.length > budget) {
+      // Single unit still over budget (only possible with a hand-made tiny budget):
+      // slice it so the length contract holds unconditionally.
+      for (const piece of sliceToBudget(md, budget)) out.push(renderHtml(piece));
+    } else {
+      out.push(html);
+    }
+    pending = [];
+    est = 0;
+  };
+
+  for (const u of units) {
+    if (pending.length > 0 && est + u.rendered + 1 > budget) flush();
+    pending.push(u);
+    est += u.rendered + 1;
+  }
+  flush();
+  return out;
 }
 
 /**

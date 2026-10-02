@@ -3,10 +3,11 @@ import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
-import { extractFileRefs } from './files.js';
+import { AttachCensor, outboundErrorMessage, planAttachments } from './files.js';
 import { resolveWorkdir } from './permissions.js';
 import { getOrCreate } from './sessions.js';
 import { resolveApproval } from './approvals.js';
+import { log } from '../log.js';
 
 export interface StreamHandle {
   push(delta: string): void;
@@ -23,16 +24,21 @@ export interface SubmitOptions {
   planOnly?: boolean;
 }
 
+/** Caption for files the agent asked to send, shown under an inline photo. */
+export const ATTACH_CAPTION = '📎 Из ответа агента';
+
 export interface Responder {
   streamStart(chatId: number, options?: { mode?: TaskMode; label?: string }): Promise<StreamHandle>;
   askApproval(chatId: number, command: string): Promise<boolean>;
   notify(chatId: number, text: string, keyboard?: unknown): Promise<void>;
   /**
-   * Optional (WAVE2/FILES): send files the agent named in its reply.
-   * Kept optional so a Responder without file support still satisfies the contract;
-   * the queue only calls it when present.
+   * Optional (WAVE2/FILES): send the files an agent reply asked for — the explicit
+   * `[[attach:path]]` markers first, the conservative path guesser as a fallback.
+   * `caption` labels the upload (used as the photo caption); each file's own name is
+   * always appended. Kept optional so a Responder without file support still satisfies
+   * the contract; the queue only calls it when present.
    */
-  attachFiles?(chatId: number, paths: string[]): Promise<void>;
+  attachFiles?(chatId: number, paths: string[], caption?: string): Promise<void>;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
@@ -264,16 +270,22 @@ export class TaskQueue {
       };
       const provider = getProvider(agentTask.agent);
       let full = '';
+      // Attach markers are stripped from the LIVE message too, not just from the final
+      // text: `[[attach:…]]` is protocol, and the owner must never see it arrive.
+      const censor = new AttachCensor();
       const onEvent = (e: AgentEvent): void => {
         if (e.type === 'text') {
           full += e.delta;
-          stream.push(e.delta);
+          stream.push(censor.push(e.delta));
         }
       };
       const result = await withTimeout(provider.run(agentTask, onEvent), this.cfg.taskTimeoutMs, () => {
         void provider.cancel(sessionId);
       });
-      const reply = result.text === '' ? full : result.text;
+      // The plan for an attachment: visible text with the markers gone, plus the files
+      // every marker and the fallback guesser resolved to inside the workdir.
+      const plan = planAttachments(result.text === '' ? full : result.text, workdir);
+      const reply = plan.text === '' ? '(пустой ответ)' : plan.text;
       // WAVE2/EXEC-BEGIN (plan turn completion: park the plan, ask to run)
       if (this.planTurns.delete(taskId)) {
         const origin = this.planOrigin.get(taskId) ?? task.prompt;
@@ -300,14 +312,19 @@ export class TaskQueue {
       this.store.addMessage(chatId, 'assistant', reply);
       this.store.setTaskStatus(taskId, 'done');
       await stream.finish(reply);
-      // WAVE2/FILES: attach files the answer named, when the responder
-      // supports it. Best-effort — a failed attachment must never fail the task.
-      if (this.io.attachFiles) {
+      // WAVE2/FILES: send what the answer asked for. Best-effort — a failed upload
+      // must never fail the task — but every refused marker is told to the owner,
+      // because a silently missing file is indistinguishable from a broken bot.
+      for (const p of plan.problems) {
+        await this.io
+          .notify(chatId, `${outboundErrorMessage(p.code)}\nФайл: ${p.requested}`)
+          .catch((e) => log(`attach-notify: ${errCode(e)}`));
+      }
+      if (this.io.attachFiles && plan.files.length > 0) {
         try {
-          const refs = extractFileRefs(reply, workdir);
-          if (refs.length > 0) await this.io.attachFiles(chatId, refs.map((r) => r.abs));
-        } catch {
-          // attachment is cosmetic; the reply already landed
+          await this.io.attachFiles(chatId, plan.files, ATTACH_CAPTION);
+        } catch (e) {
+          log(`attach-files: ${errCode(e)}`);
         }
       }
     } catch (e) {
