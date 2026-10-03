@@ -3,6 +3,8 @@ import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
+import { collectTaskFiles, snapshotGit, summarizeFiles, taskTitle } from '../miniapp/diff.js';
+import type { GitSnapshot } from '../miniapp/diff.js';
 import { AttachCensor, outboundErrorMessage, planAttachments } from './files.js';
 import { resolveWorkdir } from './permissions.js';
 import { getOrCreate } from './sessions.js';
@@ -22,6 +24,8 @@ export interface SubmitOptions {
   rolePrefix?: string;
   /** Plan mode: park the task as `awaiting_plan` instead of executing it. */
   planOnly?: boolean;
+  /** Pinned skill names attached at launch (W3: stored as `skills_used`). */
+  skills?: string[];
 }
 
 /** Caption for files the agent asked to send, shown under an inline photo. */
@@ -147,6 +151,19 @@ export class TaskQueue {
     const s = getOrCreate(this.store, this.cfg, chatId);
     this.store.addMessage(chatId, 'user', prompt);
     const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
+    // W3 launch metadata: the ONLY point where the pinned skills are known
+    // (the pump later re-reads the row, the options do not survive to it).
+    try {
+      this.store.setTaskLaunchMeta(
+        taskId,
+        taskTitle(prompt),
+        s.model,
+        s.project,
+        JSON.stringify(options.skills ?? []),
+      );
+    } catch {
+      // metadata must never break submit; execute() still snapshots the diff
+    }
     if (options.planOnly === true) {
       // WAVE2/EXEC (plan turn): the stored prompt stays the real one; the pump
       // runs the agent for a plan, execute() wraps the prompt and parks the result.
@@ -307,6 +324,20 @@ export class TaskQueue {
     });
     this.streams.set(chatId, stream);
     this.store.setTaskStatus(taskId, 'running');
+    // W3 BEFORE snapshot (right after `running`, before the agent touches
+    // anything). `resolveWorkdir` mkdirs first so the sandbox/inbox creation
+    // itself never shows up as a task change. Never throws: any failure
+    // degrades to `null` (non-git / no git / timeout → empty diff later).
+    let snapBefore: GitSnapshot | null = null;
+    let snapWorkdir = '';
+    try {
+      const sx = getOrCreate(this.store, this.cfg, chatId);
+      snapWorkdir = resolveWorkdir(this.cfg, chatId, sx.project);
+      snapBefore = snapshotGit(snapWorkdir);
+    } catch {
+      snapBefore = null;
+      snapWorkdir = '';
+    }
     try {
       const s = getOrCreate(this.store, this.cfg, chatId);
       const task = this.store.getTask(taskId);
@@ -388,6 +419,9 @@ export class TaskQueue {
       // WAVE2/EXEC-END
       this.store.setTaskCost(taskId, result.costUsd);
       this.store.addMessage(chatId, 'assistant', reply);
+      // W3 AFTER snapshot (before `done`): what the task changed lands in
+      // `task_files` + `git_*` columns. Best-effort — never fails the task.
+      this.finishTaskDiff(taskId, snapWorkdir, snapBefore);
       this.store.setTaskStatus(taskId, 'done');
       await stream.finish(reply);
       // WAVE2/FILES: send what the answer asked for. Best-effort — a failed upload
@@ -412,7 +446,36 @@ export class TaskQueue {
       this.planOrigin.delete(taskId);
       this.planRounds.delete(taskId);
       this.store.setTaskStatus(taskId, code === 'E_CANCELLED' ? 'cancelled' : 'error');
+      // W3: a failed task may still have changed files — same finalize branch
+      // (covers cancel-mid-run too: `cancel()` only flips the status, the
+      // collection always happens here when `execute` settles).
+      this.finishTaskDiff(taskId, snapWorkdir, snapBefore);
       await stream.fail(code);
+    }
+  }
+
+  /**
+   * W3 AFTER snapshot + `task_files` rows + `git_*`/`files_summary` columns +
+   * `rev` bump. Never throws: any failure degrades to NULL columns / empty
+   * rows and the task status set beside it still lands. `workdir === ''`
+   * means even the BEFORE snapshot never resolved — nothing to collect.
+   * Plan-turn parks skip this (not terminal; the approved re-run finalizes).
+   */
+  private finishTaskDiff(taskId: number, workdir: string, before: GitSnapshot | null): void {
+    try {
+      if (workdir === '') return;
+      const after = snapshotGit(workdir);
+      const files = collectTaskFiles(before, after, workdir);
+      this.store.saveTaskFiles(taskId, files);
+      this.store.setTaskGit(
+        taskId,
+        before?.porcelain ?? null,
+        after?.porcelain ?? null,
+        before?.sha ?? null,
+        JSON.stringify(summarizeFiles(files)),
+      );
+    } catch {
+      // diff collection must never fail the task itself
     }
   }
 }

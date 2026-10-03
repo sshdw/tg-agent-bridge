@@ -42,6 +42,14 @@ export interface TaskRow {
   plan_origin: string | null;
   /** Durable rework rounds already spent on a parked plan. */
   plan_reworks: number;
+  /** `git status --porcelain` before the task (W3). NULL when never collected. */
+  git_before: string | null;
+  /** `git status --porcelain` after the task (W3). NULL when never collected. */
+  git_after: string | null;
+  /** HEAD sha before the task (W3). NULL outside git repos / no git. */
+  git_base_sha: string | null;
+  /** JSON `{changed_n, added, removed}` over ALL changed files (W3). NULL until collected. */
+  files_summary: string | null;
   created_at: number;
   finished_at: number | null;
 }
@@ -87,6 +95,26 @@ export interface DraftRow {
   skills: string;
   status: string;
   created_at: number;
+}
+
+/** One changed-file row (W3). `truncated`/`binary` are 0/1. */
+export interface TaskFileRow {
+  id: number;
+  task_id: number;
+  path: string;
+  added: number;
+  removed: number;
+  /** Unified diff text (capped), NULL for binary/oversize/unreadable. */
+  diff: string | null;
+  truncated: number;
+  binary: number;
+}
+
+/** Shape of `tasks.files_summary` (JSON) and `Store.taskFilesSummary`. */
+export interface FilesSummaryShape {
+  changed_n: number;
+  added: number;
+  removed: number;
 }
 
 /** How long an approval or draft stays resolvable (24 h, seconds). */
@@ -186,8 +214,19 @@ export class Store {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (chat_id, skill)
       );
+      CREATE TABLE IF NOT EXISTS task_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        added INTEGER NOT NULL DEFAULT 0,
+        removed INTEGER NOT NULL DEFAULT 0,
+        diff TEXT,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        binary INTEGER NOT NULL DEFAULT 0
+      );
       CREATE INDEX IF NOT EXISTS idx_approvals_chat ON approvals (chat_id, status, id);
       CREATE INDEX IF NOT EXISTS idx_drafts_chat ON drafts (chat_id, status, id);
+      CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files (task_id);
     `);
 
     // v0.2: real agent sessions (opencode `ses_*`), NULL means "start a fresh one".
@@ -206,6 +245,11 @@ export class Store {
     this.addColumn('tasks', 'rev', 'INTEGER DEFAULT 0');
     this.addColumn('tasks', 'plan_origin', 'TEXT');
     this.addColumn('tasks', 'plan_reworks', 'INTEGER DEFAULT 0');
+    // v0.5 W3: what the task changed (git snapshots + file diffs for the Mini App).
+    this.addColumn('tasks', 'git_before', 'TEXT');
+    this.addColumn('tasks', 'git_after', 'TEXT');
+    this.addColumn('tasks', 'git_base_sha', 'TEXT');
+    this.addColumn('tasks', 'files_summary', 'TEXT');
     // After every column exists (fresh and legacy DBs alike).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_rev ON tasks (id, rev)');
   }
@@ -309,6 +353,99 @@ export class Store {
   /** Durable plan metadata: origin prompt + spent rework rounds of a parked plan. */
   setTaskPlanMeta(id: number, origin: string, reworks: number): void {
     this.db.prepare('UPDATE tasks SET plan_origin = ?, plan_reworks = ? WHERE id = ?').run(origin, reworks, id);
+  }
+
+  /**
+   * W3 launch metadata, written once at submit (the only point where the
+   * pinned skills are known): short title, session model/project, skills JSON.
+   * No `rev` bump — the lifecycle bumps (running/cost/done/git) own that.
+   */
+  setTaskLaunchMeta(id: number, title: string, model: string, project: string, skillsJson: string): void {
+    this.db
+      .prepare('UPDATE tasks SET title = ?, model = ?, project = ?, skills_used = ? WHERE id = ?')
+      .run(title, model, project, skillsJson, id);
+  }
+
+  /**
+   * W3 diff finalize: git snapshots + `files_summary` JSON + `rev` bump (so
+   * cheap polling sees the diff arrival, including on the error path).
+   * NULLs mean "never collected" (non-git workdir, no git on PATH, timeout).
+   */
+  setTaskGit(
+    id: number,
+    before: string | null,
+    after: string | null,
+    baseSha: string | null,
+    summaryJson: string | null,
+  ): void {
+    this.db
+      .prepare(
+        'UPDATE tasks SET git_before = ?, git_after = ?, git_base_sha = ?, files_summary = ?, rev = rev + 1 WHERE id = ?',
+      )
+      .run(before, after, baseSha, summaryJson, id);
+  }
+
+  /**
+   * Replace the `task_files` rows of a task. Stores at most the first 50
+   * files (by the caller's order); beyond that only the `files_summary`
+   * counters on the task row carry the full count.
+   */
+  saveTaskFiles(
+    taskId: number,
+    files: { path: string; added: number; removed: number; diff: string | null; truncated: boolean; binary: boolean }[],
+  ): void {
+    const tx = this.db.transaction(
+      (list: { path: string; added: number; removed: number; diff: string | null; truncated: boolean; binary: boolean }[]) => {
+        this.db.prepare('DELETE FROM task_files WHERE task_id = ?').run(taskId);
+        const ins = this.db.prepare(
+          'INSERT INTO task_files (task_id, path, added, removed, diff, truncated, binary) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        );
+        for (const f of list.slice(0, 50)) {
+          ins.run(taskId, f.path, f.added, f.removed, f.diff, f.truncated ? 1 : 0, f.binary ? 1 : 0);
+        }
+      },
+    );
+    tx(files);
+  }
+
+  /** Changed-file rows of a task, in insertion order. */
+  taskFiles(taskId: number): TaskFileRow[] {
+    return this.db
+      .prepare('SELECT * FROM task_files WHERE task_id = ? ORDER BY id ASC')
+      .all(taskId) as TaskFileRow[];
+  }
+
+  /**
+   * `{changed_n, added, removed}` for a task. Prefers the cached
+   * `files_summary` (which holds the FULL count past the 50-row cap);
+   * falls back to the stored rows when no summary was collected.
+   */
+  taskFilesSummary(taskId: number): FilesSummaryShape {
+    const row = this.db.prepare('SELECT files_summary FROM tasks WHERE id = ?').get(taskId) as {
+      files_summary: string | null;
+    } | undefined;
+    if (row?.files_summary) {
+      try {
+        const s = JSON.parse(row.files_summary) as Partial<FilesSummaryShape>;
+        if (
+          typeof s.changed_n === 'number' &&
+          typeof s.added === 'number' &&
+          typeof s.removed === 'number'
+        ) {
+          return { changed_n: s.changed_n, added: s.added, removed: s.removed };
+        }
+      } catch {
+        // corrupt summary: fall through to the rows
+      }
+    }
+    const files = this.taskFiles(taskId);
+    let added = 0;
+    let removed = 0;
+    for (const f of files) {
+      added += f.added;
+      removed += f.removed;
+    }
+    return { changed_n: files.length, added, removed };
   }
 
   /** Empty `cost` clears the value; undefined leaves it untouched. Bumps `rev` (§5). */
