@@ -197,8 +197,11 @@ const dbPath = (name) => join(dbDir, `${name}.db`);
     approvalReply('live', true) === '✅ Разрешено.' && approvalReply('live', false) === 'Отклонено.',
   );
   // cancel must skip the orphan and fall through (no plan/task here).
+  // W4 (M1): cancel returns `{kind, id}` — the id of the row that actually
+  // stopped, so the Mini App `stop` can name it. Nothing stopped ⇒ kind only.
   const q = new TaskQueue(s, cfg, fakeIo());
-  check('M1: cancel skips orphan approval', (await q.cancel(777)) === 'nothing');
+  const cancelled = await q.cancel(777);
+  check('M1: cancel skips orphan approval', cancelled.kind === 'nothing' && cancelled.id === null);
   s.close();
 }
 

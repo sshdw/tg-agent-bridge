@@ -3,6 +3,8 @@ import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { collectTaskFiles, snapshotGit, summarizeFiles, taskTitle } from '../miniapp/diff.js';
 import { DIFF_BUDGET_MS } from '../miniapp/diff.js';
 import type { GitSnapshot } from '../miniapp/diff.js';
@@ -27,10 +29,227 @@ export interface SubmitOptions {
   planOnly?: boolean;
   /** Pinned skill names attached at launch (W3: stored as `skills_used`). */
   skills?: string[];
+  /**
+   * W4 (M2/M3): run context override. The Mini App confirmation card snapshots
+   * agent/model/project, and `retry`/`continue` reproduce the SOURCE task's
+   * context — both must survive a later `PUT /api/settings`, so they are passed
+   * explicitly instead of being re-read from the live session at execute time.
+   * Omitted → today's behaviour exactly (the session decides).
+   */
+  agent?: AgentId;
+  model?: string;
+  project?: string;
 }
 
 /** Caption for files the agent asked to send, shown under an inline photo. */
 export const ATTACH_CAPTION = '📎 Из ответа агента';
+
+/**
+ * What `cancel` stopped. `id` is the row that ACTUALLY changed — never the
+ * caller's guess: §5.1 item 10 requires `task_id` to identify the stopped
+ * resource, and a Mini App `stop` may address any task id while the real target
+ * is a parked plan or a pending approval with a different one (W4 M1).
+ */
+export interface CancelResult {
+  kind: 'approval' | 'task' | 'plan' | 'nothing';
+  /** Row id of the stopped resource; `null` for `nothing` (and for an approval
+   *  with no durable row, impossible while a Store is bound). */
+  id: number | null;
+}
+
+/**
+ * W4 skills (R3 §4a/§4b path ①): pinned skill names are stored on the draft/task
+ * (`skills_used` = PINNED INTENT, not observed tool_use — see the NOTE in
+ * `submit`), and the SKILL.md bodies are prepended to the prompt at execute
+ * time. Execute-time (not submit-time) composition keeps retry/continue from
+ * stacking the same bodies twice: the stored prompt stays raw.
+ */
+
+/** `SKILL.md` frontmatter `name:` shape (R3 §4): kebab-case, 1–64 chars. */
+export const SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const SKILL_NAME_MAX = 64;
+/** Per-skill body cap for the prompt prepend (a SKILL.md is docs, not a dump). */
+export const SKILL_BODY_MAX = 16 * 1024;
+/** Max skills composed into one prompt. */
+export const SKILL_PREPEND_MAX = 10;
+
+/** One discovered skill: name + description + where it came from. */
+export interface SkillEntry {
+  name: string;
+  description: string;
+  source: 'project' | 'global';
+  /** Absolute directory holding the `SKILL.md` (nearest wins on duplicates). */
+  dir: string;
+}
+
+/** Skill search roots for a workdir, nearest first. */
+function skillSearchDirs(workdir: string): { dir: string; source: 'project' | 'global' }[] {
+  const out: { dir: string; source: 'project' | 'global' }[] = [];
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  let homeAbs = '';
+  try {
+    homeAbs = home === '' ? '' : resolve(home);
+  } catch {
+    homeAbs = '';
+  }
+  try {
+    let cur = resolve(workdir);
+    for (let depth = 0; depth < 32; depth += 1) {
+      // m12: the user's HOME directory is not a project. When the upward walk
+      // reaches it (every workdir under `~/…` does, and so does every temp
+      // workdir), `~/.opencode/skills` must be reported as `global`, not
+      // `project` — §5.1 item 29 contracts exactly two sources. A project that
+      // merely LIVES under home (`~/dev/app/.opencode/skills`) still walks up
+      // from itself and stays `project`.
+      const atHome = homeAbs !== '' && cur === homeAbs;
+      for (const scope of ['.opencode/skills', '.claude/skills', '.agents/skills']) {
+        out.push({ dir: join(cur, scope), source: atHome ? 'global' : 'project' });
+      }
+      const parent = dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  } catch {
+    // unresolvable workdir: fall through to global + repo roots only
+  }
+  // Explicit global roots, for a workdir OUTSIDE home (`D:/projects/…`), where
+  // the upward walk never gets near them. Duplicates of the walk are harmless
+  // (nearest-wins + `seen` in `listSkills`).
+  if (homeAbs !== '') {
+    for (const scope of ['.config/opencode/skills', '.opencode/skills', '.claude/skills', '.agents/skills']) {
+      out.push({ dir: join(homeAbs, scope), source: 'global' });
+    }
+  }
+  // Bundled repo skills (`skills/` next to the checkout): project-scoped.
+  try {
+    out.push({ dir: join(resolve(process.cwd()), 'skills'), source: 'project' });
+  } catch {
+    // process.cwd() cannot fail in practice; guard keeps this total
+  }
+  return out;
+}
+
+/** Parse `name:`/`description:` out of a SKILL.md frontmatter block. */
+function parseSkillFrontmatter(text: string): { name: string; description: string } | null {
+  const lines = text.split('\n');
+  if ((lines[0] ?? '').trim() !== '---') return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if ((lines[i] ?? '').trim() === '---') {
+      end = i;
+      break;
+    }
+    if (i > 40) break;
+  }
+  if (end < 0) return null;
+  let name = '';
+  let description = '';
+  for (const ln of lines.slice(1, end)) {
+    const m = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(ln.trim());
+    if (!m) continue;
+    const unquote = (v: string): string => {
+      const t = v.trim();
+      if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1);
+      if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1);
+      return t;
+    };
+    if (m[1] === 'name' && name === '') name = unquote(m[2] ?? '');
+    else if (m[1] === 'description' && description === '') description = unquote(m[2] ?? '');
+  }
+  if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX) return null;
+  if (description === '' || description.length > 1024) return null;
+  return { name, description };
+}
+
+/**
+ * List every discoverable skill for a workdir (R3 §4a): project skill dirs
+ * (`.opencode/skills`, plus `.claude` and `.agents` compat) scanned upward
+ * from the workdir, plus global `~/.config/opencode/skills` and repo `skills/`.
+ * Nearest wins on duplicate names. Never throws — an unreadable tree lists nothing.
+ */
+export function listSkills(workdir: string): SkillEntry[] {
+  const out: SkillEntry[] = [];
+  const seen = new Set<string>();
+  for (const root of skillSearchDirs(workdir)) {
+    let names: string[];
+    try {
+      names = readdirSync(root.dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX || seen.has(name)) continue;
+      const file = join(root.dir, name, 'SKILL.md');
+      let text: string;
+      try {
+        if (!statSync(file).isFile()) continue;
+        text = readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const fm = parseSkillFrontmatter(text);
+      if (!fm || fm.name !== name) continue;
+      seen.add(name);
+      out.push({ name, description: fm.description, source: root.source, dir: join(root.dir, name) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Raw body of one named skill (the full SKILL.md text, capped), or null when
+ * the skill is not discoverable from this workdir. Name-gated: only
+ * well-formed kebab-case names ever hit the filesystem.
+ */
+export function readSkillBody(workdir: string, name: string): string | null {
+  if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX) return null;
+  for (const root of skillSearchDirs(workdir)) {
+    const file = join(root.dir, name, 'SKILL.md');
+    try {
+      if (!statSync(file).isFile()) continue;
+      const text = readFileSync(file, 'utf8');
+      const fm = parseSkillFrontmatter(text);
+      if (!fm || fm.name !== name) continue;
+      return text.length > SKILL_BODY_MAX ? text.slice(0, SKILL_BODY_MAX) : text;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** Parse a stored `skills_used`/draft `skills` JSON array defensively. */
+export function parseSkillNames(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v: unknown = JSON.parse(json);
+    if (!Array.isArray(v)) return [];
+    return v.filter((s): s is string => typeof s === 'string' && SKILL_NAME_RE.test(s)).slice(0, SKILL_PREPEND_MAX);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Compose the skill prefix for a prompt (R3 §4b path ①): one `# Skill: <name>`
+ * section per resolvable pinned skill. Unknown names are skipped silently —
+ * pinning is intent, the file may appear later. Pure composition, no I/O beyond
+ * the skill files themselves.
+ */
+export function prependSkillBodies(workdir: string, prompt: string, skills: string[]): string {
+  const names = skills.filter((s) => SKILL_NAME_RE.test(s)).slice(0, SKILL_PREPEND_MAX);
+  if (names.length === 0) return prompt;
+  const sections: string[] = [];
+  for (const name of names) {
+    const body = readSkillBody(workdir, name);
+    if (body !== null) sections.push(`# Skill: ${name}\n${body}`);
+  }
+  if (sections.length === 0) return prompt;
+  return `${sections.join('\n\n')}\n\n${prompt}`;
+}
 
 export interface Responder {
   streamStart(chatId: number, options?: { mode?: TaskMode; label?: string }): Promise<StreamHandle>;
@@ -161,8 +380,13 @@ export class TaskQueue {
     options: SubmitOptions = {},
   ): 'started' | 'queued' | 'planned' {
     const s = getOrCreate(this.store, this.cfg, chatId);
+    // W4 (M2/M3): an explicit run context wins over the live session — the card
+    // the owner confirmed, or the source task being retried/continued.
+    const agent = options.agent ?? s.agent;
+    const model = options.model ?? s.model;
+    const project = options.project ?? s.project;
     this.store.addMessage(chatId, 'user', prompt);
-    const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
+    const taskId = this.store.createTask(chatId, agent, mode, prompt, images, options.preset ?? '');
     // W3 launch metadata: the ONLY point where the pinned skills are known
     // (the pump later re-reads the row, the options do not survive to it).
     // NOTE (m1): `skills_used` is PINNED INTENT at submit, not observed
@@ -171,8 +395,8 @@ export class TaskQueue {
       this.store.setTaskLaunchMeta(
         taskId,
         taskTitle(prompt),
-        s.model,
-        s.project,
+        model,
+        project,
         JSON.stringify(options.skills ?? []),
       );
     } catch {
@@ -290,18 +514,20 @@ export class TaskQueue {
     return this.waitingFor(chatId) !== undefined;
   }
 
-  async cancel(chatId: number): Promise<'approval' | 'task' | 'plan' | 'nothing'> {
+  async cancel(chatId: number): Promise<CancelResult> {
     // Only a LIVE waiter counts as an approval cancel; an orphaned row is
     // settled as denied inside resolveApproval and cancel falls through.
-    if (resolveApproval(chatId, false) === 'live') return 'approval';
+    // The pending row is read BEFORE the flip so the response can name it.
+    const pendingId = this.store.pendingApproval(chatId)?.id ?? null;
+    if (resolveApproval(chatId, false) === 'live') return { kind: 'approval', id: pendingId };
     const waiting = this.waitingFor(chatId);
     if (waiting) {
       this.planWaiting.delete(chatId);
       this.store.setTaskStatus(waiting.taskId, 'cancelled');
-      return 'plan';
+      return { kind: 'plan', id: waiting.taskId };
     }
     const task = this.store.runningTask(chatId);
-    if (!task || !this.pumping.has(chatId)) return 'nothing';
+    if (!task || !this.pumping.has(chatId)) return { kind: 'nothing', id: null };
     this.store.setTaskStatus(task.id, 'cancelled');
     const sid = this.sessionIds.get(chatId);
     if (sid) {
@@ -312,7 +538,7 @@ export class TaskQueue {
       }
     }
     await this.streams.get(chatId)?.fail('E_CANCELLED');
-    return 'task';
+    return { kind: 'task', id: task.id };
   }
 
   status(chatId: number): { running: boolean; pending: number; plan: boolean } {
@@ -347,6 +573,21 @@ export class TaskQueue {
     });
     this.streams.set(chatId, stream);
     this.store.setTaskStatus(taskId, 'running');
+    // W4 (M2/M3): the run context is the TASK ROW, not the live session — §4.2
+    // stores `model`/`project` "на момент запуска", and that is exactly what a
+    // confirmed confirmation card (M2) and a retry/continue (M3) must honour
+    // after `PUT /api/settings` moved the session on. The row ALWAYS wins,
+    // including `''` — `''` is a real value ("the sandbox", or "no model"), and
+    // collapsing it to "ask the session" is precisely the drift M2 reported
+    // (card said model:"" → the task ran "drifted-model"). Only `NULL` (a row
+    // whose column was never written) falls back to the session.
+    // Known one-way trade-off: `ALTER TABLE … DEFAULT ''` gave every PRE-W2 row
+    // `project=''`, so a task that was still pending at the W2 migration runs in
+    // the per-chat sandbox instead of the session project. Deliberate: the W2
+    // migration is merged and its one-time window has passed, and correctness of
+    // the confirmed-card contract is worth more than that row's old intent.
+    const s0 = getOrCreate(this.store, this.cfg, chatId);
+    const runProject = task0?.project ?? s0.project;
     // W3 BEFORE snapshot (right after `running`, before the agent touches
     // anything). `resolveWorkdir` mkdirs first so the sandbox/inbox creation
     // itself never shows up as a task change. Never throws: any failure
@@ -354,8 +595,7 @@ export class TaskQueue {
     let snapBefore: GitSnapshot | null = null;
     let snapWorkdir = '';
     try {
-      const sx = getOrCreate(this.store, this.cfg, chatId);
-      snapWorkdir = resolveWorkdir(this.cfg, chatId, sx.project);
+      snapWorkdir = resolveWorkdir(this.cfg, chatId, runProject);
       // N1: the sig loop over a pathological dirty tree is bounded too —
       // missing sigs degrade to conservative keep.
       snapBefore = snapshotGit(snapWorkdir, Date.now() + DIFF_BUDGET_MS);
@@ -403,7 +643,8 @@ export class TaskQueue {
       const s = getOrCreate(this.store, this.cfg, chatId);
       const task = this.store.getTask(taskId);
       if (!task) throw new Error('E_NO_TASK');
-      const workdir = resolveWorkdir(this.cfg, chatId, s.project);
+      const workdir = resolveWorkdir(this.cfg, chatId, task.project ?? s.project);
+      const model = task.model ?? s.model;
       const history: HistoryItem[] = this.store
         .recentMessages(chatId, this.cfg.historyLimit)
         .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -411,14 +652,19 @@ export class TaskQueue {
       const sessionId = `${chatId}:${task.id}`;
       this.sessionIds.set(chatId, sessionId);
       const images: string[] = JSON.parse(task.images) as string[];
+      // W4 skills (R3 §4b path ①): pinned SKILL.md bodies are composed onto the
+      // prompt HERE, at execute time — the stored prompt stays raw so retry /
+      // continue never stack the same bodies twice. Plan-turn wrapping applies
+      // first (the plan instruction describes the implementation prompt).
+      const basePrompt = this.planTurns.has(taskId) ? planPrompt(task.prompt) : task.prompt;
       const agentTask: AgentTask = {
         sessionId,
         agent: task.agent as AgentId,
         mode: task.mode as TaskMode,
-        model: s.model,
+        model,
         // WAVE2/EXEC (plan turn): the stored prompt is the real one; the plan
         // instruction wraps it here so approve can run the original as-is.
-        prompt: this.planTurns.has(taskId) ? planPrompt(task.prompt) : task.prompt,
+        prompt: prependSkillBodies(workdir, basePrompt, parseSkillNames(task.skills_used)),
         images,
         workdir,
         autoApprove: s.autoApprove,
