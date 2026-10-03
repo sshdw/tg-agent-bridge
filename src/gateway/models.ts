@@ -20,6 +20,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { childEnv, sanitize } from './spawnRunner.js';
 import { log } from '../log.js';
 
@@ -135,6 +137,45 @@ interface CacheEntry {
 let cache: CacheEntry | null = null;
 let inflight: Promise<Omit<ModelListResult, 'cached'>> | null = null;
 
+/** The shim extensions npm writes next to a package's bin on Windows. */
+const SHIM_RE = /\.(cmd|bat|ps1)$/i;
+
+/**
+ * The binary to spawn for `opencode models`.
+ *
+ * `resolveBin()` prefers the npm `.cmd` shim, and Node's `spawn()` REFUSES those on
+ * Windows: `spawn('opencode.cmd', …)` throws a bare `EINVAL` (verified on the owner's
+ * machine). The shim is a two-line script that names the real executable — the owner's
+ * reads `"%dp0%\node_modules\@opencode\cli\bin\opencode.exe" %*` — so the path is read
+ * out of the shim, `~dp0` expanded to the shim's own directory, and used only if that
+ * file really exists. An explicit absolute `OPENCODE_BIN` is used as-is.
+ */
+export function spawnableBin(bin: string): string {
+  if (!SHIM_RE.test(bin)) return bin;
+  const dir = dirname(bin);
+  // 1. A real `.exe` sitting next to the shim.
+  const sibling = join(dir, `${basename(bin, extname(bin))}.exe`);
+  if (existsSync(sibling)) return sibling;
+  // 2. The target the shim script itself points at.
+  const target = shimTarget(dir);
+  return target ?? bin;
+}
+
+/** Absolute `.exe` path named inside a `.cmd`/`.ps1` shim, or null. */
+function shimTarget(dir: string): string | null {
+  let script: string;
+  try {
+    script = readFileSync(join(dir, 'opencode.cmd'), 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /"?((?:%~dp0%?|%dp0%?|dp0|\.|\.\\)[\\/][^"\r\n]*?\.exe)"?/i.exec(script);
+  if (m === null) return null;
+  const raw = (m[1] ?? '').replace(/%~dp0%?|%dp0%?|dp0/gi, dir.endsWith(sep) ? dir : `${dir}${sep}`);
+  const abs = resolve(dir, raw);
+  return existsSync(abs) ? abs : null;
+}
+
 /**
  * Spawn `bin models` and return the parsed ids. Never throws and never rejects: a
  * missing binary, a non-zero exit, a timeout and unparsable output all resolve to an
@@ -142,20 +183,29 @@ let inflight: Promise<Omit<ModelListResult, 'cached'>> | null = null;
  */
 export function listModels(bin: string, timeoutMs = MODEL_LIST_TIMEOUT_MS): Promise<Omit<ModelListResult, 'cached'>> {
   return new Promise((resolve) => {
+    // Declared before anything can fail: `spawn` THROWS synchronously on Windows for a
+    // non-spawnable target (EINVAL for a `.cmd` shim), so `done` must not touch a
+    // binding that is still in its temporal dead zone.
+    let timer: NodeJS.Timeout | undefined;
     const done = (models: string[], all: string[], error: string | null): void => {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       const result: Omit<ModelListResult, 'cached'> = { models, all, error, fetchedAt: Date.now() };
       resolve(result);
     };
+    const exe = spawnableBin(bin);
     let child;
     try {
-      child = spawn(bin, ['models'], {
+      child = spawn(exe, ['models'], {
         env: childEnv(),
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
-      done([], [], `не удалось запустить opencode: ${sanitize(String(e))}`);
+      const m = String(e);
+      const how = /EINVAL/.test(m)
+        ? `не запускается: ${exe} (укажи абсолютный путь к .exe в OPENCODE_BIN)`
+        : `не удалось запустить opencode: ${sanitize(m)}`;
+      done([], [], how);
       return;
     }
     let settled = false;
@@ -164,7 +214,7 @@ export function listModels(bin: string, timeoutMs = MODEL_LIST_TIMEOUT_MS): Prom
       settled = true;
       done(models, all, error);
     };
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try {
         child.kill();
       } catch {
@@ -185,7 +235,12 @@ export function listModels(bin: string, timeoutMs = MODEL_LIST_TIMEOUT_MS): Prom
       if (stderr.length < 2000) stderr += chunk;
     });
     child.on('error', (e: Error) => {
-      finish([], [], /ENOENT/.test(e.message) ? `не найден бинарник: ${bin}` : sanitize(e.message));
+      const how = /ENOENT/.test(e.message)
+        ? `не найден бинарник: ${exe}`
+        : /EINVAL/.test(e.message)
+          ? `не запускается: ${exe} (укажи абсолютный путь к .exe в OPENCODE_BIN)`
+          : sanitize(e.message);
+      finish([], [], how);
     });
     child.on('close', (code) => {
       const all = parseModelList(stdout);
