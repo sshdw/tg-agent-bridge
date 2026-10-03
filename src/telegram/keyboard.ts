@@ -53,17 +53,25 @@ export function agentPickerKeyboard(chatId: number, agents: string[], current: s
 }
 
 /**
- * A compact grid of model buttons plus a reset. Accepts however many models the
- * caller passes; two per row keeps labels readable on a phone.
+ * A compact grid of model buttons plus a reset.
+ *
+ * `models` is a curated, capped list of picks, each already carrying its own button
+ * label; the FULL id goes into the server-side nonce, so a short label costs the owner
+ * nothing and callback data never carries more than an opaque token.
  */
-export function modelKeyboard(chatId: number, models: string[], current: string): InlineKeyboard {
+export function modelKeyboard(
+  chatId: number,
+  models: { id: string; label: string; pinned?: boolean }[],
+  current: string,
+): InlineKeyboard {
   const kb = new InlineKeyboard();
   const perRow = 2;
   let col = 0;
   let first = true;
   for (const model of models) {
-    const label = model === current ? `✅ ${model}` : model;
-    const nonce = put(chatId, SCOPE.model, model);
+    const mark = model.id === current ? '✅ ' : model.pinned === true ? '⭐ ' : '';
+    const label = `${mark}${model.label}`;
+    const nonce = put(chatId, SCOPE.model, model.id);
     const btn = InlineKeyboard.text(label, encodeCallback(SCOPE.model, nonce));
     if (first) kb.add(btn);
     else if (col === 0) kb.row().add(btn);
@@ -78,13 +86,37 @@ export function modelKeyboard(chatId: number, models: string[], current: string)
   return kb;
 }
 
-/** One project per row: names are `WORK_ROOT` subdirectory names. Current one marked. */
-export function projectPickerKeyboard(chatId: number, projects: string[], current: string): InlineKeyboard {
+/**
+ * Model buttons for "did you mean" candidates after `/model <text>` matched nothing.
+ * Same discipline: the full id is server-side, the label is what fits on a phone.
+ */
+export function modelCandidatesKeyboard(chatId: number, ids: string[], labels: string[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  ids.forEach((id, i) => {
+    const btn = InlineKeyboard.text(labels[i] ?? id, encodeCallback(SCOPE.model, put(chatId, SCOPE.model, id)));
+    if (i === 0) kb.add(btn);
+    else kb.row().add(btn);
+  });
+  return kb;
+}
+
+/**
+ * One project per row, labelled unambiguously across roots.
+ *
+ * The payload is the resolved ABSOLUTE directory, so a folder named `api` in two roots
+ * is two distinct, correct choices and neither depends on which root happens to be
+ * listed first. `resolveWorkdir` still guards every one of them.
+ */
+export function projectPickerKeyboard(
+  chatId: number,
+  projects: { name: string; dir: string; label: string }[],
+  current: string,
+): InlineKeyboard {
   const kb = new InlineKeyboard();
   let first = true;
-  for (const name of projects) {
-    const label = name === current ? `✅ ${name}` : name;
-    const nonce = put(chatId, SCOPE.project, name);
+  for (const p of projects) {
+    const label = p.dir === current ? `✅ ${p.label}` : p.label;
+    const nonce = put(chatId, SCOPE.project, p.dir);
     if (first) kb.add(InlineKeyboard.text(label, encodeCallback(SCOPE.project, nonce)));
     else kb.row().text(label, encodeCallback(SCOPE.project, nonce));
     first = false;

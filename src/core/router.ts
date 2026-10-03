@@ -23,7 +23,8 @@ import { runExec } from '../core/exec.js';
 import { CODE_USAGE, requestCode, tryPlanRework } from '../core/plan.js';
 import { PRESET_NAMES, applyPreset, type PresetName } from '../core/presets.js';
 import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
-import { resolveWorkdir } from '../core/permissions.js';
+import { projectDeniedMessage, resolveWorkdir } from '../core/permissions.js';
+import { modelLabel } from '../gateway/models.js';
 // [WAVE2-GITHUB] §1.6 — handlers live in the github layer so Core stays a command table.
 import { handleCi, handleCommit, handlePr, handleWatch } from '../github/commands.js';
 import { availableProviders } from '../gateway/registry.js';
@@ -33,11 +34,12 @@ import { sendOutboundFile } from '../telegram/outbound.js';
 import {
   approvalKeyboard,
   registerCallbacks,
+  resolveModelArg,
   showAgentPicker,
   showModelPicker,
   showProjectPicker,
 } from '../telegram/callbacks.js';
-import { SCOPE } from '../telegram/keyboard.js';
+import { modelCandidatesKeyboard, SCOPE } from '../telegram/keyboard.js';
 import { runSys } from './sys.js';
 import { updateConfirmKeyboard } from '../telegram/keyboard.js';
 import { clear } from '../telegram/nonce.js';
@@ -407,12 +409,31 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     }
   });
 
-  bot.command('model', (ctx) => {
+  bot.command('model', async (ctx) => {
     const chatId = ctx.chat.id;
     const m = arg(ctx.message?.text);
     if (m === '') return showModelPicker(ctx, deps);
-    updateSession(store, chatId, { model: m });
-    return deps.io.notify(chatId, `Модель: ${m}`);
+    // Resolve against the LIVE opencode list. Accepting an unknown id silently is what
+    // made the picker look broken: the error only surfaced later, inside the agent.
+    const found = await resolveModelArg(cfg, m);
+    if (found.error !== null) {
+      return deps.io.notify(
+        chatId,
+        `⚠️ Не удалось получить список моделей: ${found.error}.\n` +
+          'Проверь OPENCODE_BIN в .env. Текущая модель продолжает работать.',
+      );
+    }
+    if (found.id !== null) {
+      updateSession(store, chatId, { model: found.id });
+      return deps.io.notify(chatId, `Модель: ${found.id}`);
+    }
+    if (found.candidates.length === 0) {
+      return deps.io.notify(chatId, `❓ Модель «${m}» не найдена в списке opencode. Открой /model без аргумента.`);
+    }
+    const labels = found.candidates.map((id) => modelLabel(id));
+    return ctx.reply(`Не нашёл «${m}». Похожее — выбери:`, {
+      reply_markup: modelCandidatesKeyboard(chatId, found.candidates, labels),
+    });
   });
 
   bot.command('project', (ctx) => {
@@ -420,13 +441,15 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     const p = arg(ctx.message?.text);
     if (p === '') return showProjectPicker(ctx, deps);
     try {
-      resolveWorkdir(cfg, chatId, p);
+      // The guard is the only thing that decides; the stored value is the RESOLVED
+      // directory, so a later bare name can never silently rebind the chat elsewhere.
+      const dir = resolveWorkdir(cfg, chatId, p);
       const prev = store.getSession(chatId)?.project;
-      updateSession(store, chatId, { project: p });
-      if (prev !== undefined && prev !== p) dropAgentSession(store, chatId);
-      return deps.io.notify(chatId, `Проект: ${p}`);
-    } catch {
-      return deps.io.notify(chatId, '🔒 Папка вне разрешённых. Смотри ALLOWED_ROOTS в .env.');
+      updateSession(store, chatId, { project: dir });
+      if (prev !== undefined && prev !== dir) dropAgentSession(store, chatId);
+      return deps.io.notify(chatId, `Проект: ${dir}`);
+    } catch (e) {
+      return deps.io.notify(chatId, projectDeniedMessage(e));
     }
   });
 

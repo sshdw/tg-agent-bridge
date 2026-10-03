@@ -7,6 +7,7 @@ import type { Responder } from './core/queue.js';
 import type { Deps } from './core/router.js';
 import { createResponder } from './core/router.js';
 import { registerPlanFlow } from './core/plan.js';
+import { cachedModels } from './gateway/models.js';
 import { register } from './gateway/registry.js';
 import { ClineProvider } from './providers/cline.js';
 import { CursorProvider } from './providers/cursor.js';
@@ -15,6 +16,7 @@ import { MockProvider } from './providers/mock.js';
 import { OpenCodeProvider } from './providers/opencode.js';
 import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
+import { probeRichSupport } from './telegram/rich.js';
 import { startCiPoller } from './github/ciPoller.js';
 import { log } from './log.js';
 import { VERSION } from './version.js';
@@ -79,6 +81,26 @@ async function main(): Promise<void> {
   }
   if (interrupted > 0) log(`recovered ${interrupted} stale running task(s) -> pending`);
   if (running > 0) log(`ci watch entries: ${running}`);
+
+  // Probe Rich Messages support once, at boot, off the critical path. The probe sends an
+  // empty payload, so there is no chat_id and nothing can be delivered to anyone; its
+  // verdict is cached in `rich.ts`, so every later send costs a map lookup instead of a
+  // failed round trip. Not awaited: a slow or unreachable API must not delay startup.
+  void probeRichSupport(bot.api)
+    .then((v) => log(`telegram rich messages: ${v}`))
+    .catch(() => undefined);
+
+  // Warm the model cache in the background too, so the owner's first `/model` tap is
+  // instant. A failure is logged and otherwise ignored.
+  void cachedModels(cfg.opencodeBin)
+    .then((m) =>
+      log(
+        m.error === null
+          ? `models: ${m.models.length} chat models from ${cfg.opencodeBin}`
+          : `models: unavailable (${m.error})`,
+      ),
+    )
+    .catch(() => undefined);
 
   startCiPoller(cfg, store, deps.io);
 
