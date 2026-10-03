@@ -3,6 +3,8 @@ import { getProvider } from '../gateway/registry.js';
 import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../gateway/types.js';
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { collectTaskFiles, snapshotGit, summarizeFiles, taskTitle } from '../miniapp/diff.js';
 import { DIFF_BUDGET_MS } from '../miniapp/diff.js';
 import type { GitSnapshot } from '../miniapp/diff.js';
@@ -31,6 +33,180 @@ export interface SubmitOptions {
 
 /** Caption for files the agent asked to send, shown under an inline photo. */
 export const ATTACH_CAPTION = '📎 Из ответа агента';
+
+/**
+ * W4 skills (R3 §4a/§4b path ①): pinned skill names are stored on the draft/task
+ * (`skills_used` = PINNED INTENT, not observed tool_use — see the NOTE in
+ * `submit`), and the SKILL.md bodies are prepended to the prompt at execute
+ * time. Execute-time (not submit-time) composition keeps retry/continue from
+ * stacking the same bodies twice: the stored prompt stays raw.
+ */
+
+/** `SKILL.md` frontmatter `name:` shape (R3 §4): kebab-case, 1–64 chars. */
+export const SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const SKILL_NAME_MAX = 64;
+/** Per-skill body cap for the prompt prepend (a SKILL.md is docs, not a dump). */
+export const SKILL_BODY_MAX = 16 * 1024;
+/** Max skills composed into one prompt. */
+export const SKILL_PREPEND_MAX = 10;
+
+/** One discovered skill: name + description + where it came from. */
+export interface SkillEntry {
+  name: string;
+  description: string;
+  source: 'project' | 'global';
+  /** Absolute directory holding the `SKILL.md` (nearest wins on duplicates). */
+  dir: string;
+}
+
+/** Skill search roots for a workdir, nearest first. */
+function skillSearchDirs(workdir: string): { dir: string; source: 'project' | 'global' }[] {
+  const out: { dir: string; source: 'project' | 'global' }[] = [];
+  try {
+    let cur = resolve(workdir);
+    for (let depth = 0; depth < 32; depth += 1) {
+      for (const scope of ['.opencode/skills', '.claude/skills', '.agents/skills']) {
+        out.push({ dir: join(cur, scope), source: 'project' });
+      }
+      const parent = dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  } catch {
+    // unresolvable workdir: fall through to global + repo roots only
+  }
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  if (home !== '') out.push({ dir: join(home, '.config', 'opencode', 'skills'), source: 'global' });
+  // Bundled repo skills (`skills/` next to the checkout): project-scoped.
+  try {
+    out.push({ dir: join(resolve(process.cwd()), 'skills'), source: 'project' });
+  } catch {
+    // process.cwd() cannot fail in practice; guard keeps this total
+  }
+  return out;
+}
+
+/** Parse `name:`/`description:` out of a SKILL.md frontmatter block. */
+function parseSkillFrontmatter(text: string): { name: string; description: string } | null {
+  const lines = text.split('\n');
+  if ((lines[0] ?? '').trim() !== '---') return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if ((lines[i] ?? '').trim() === '---') {
+      end = i;
+      break;
+    }
+    if (i > 40) break;
+  }
+  if (end < 0) return null;
+  let name = '';
+  let description = '';
+  for (const ln of lines.slice(1, end)) {
+    const m = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(ln.trim());
+    if (!m) continue;
+    const unquote = (v: string): string => {
+      const t = v.trim();
+      if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1);
+      if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1);
+      return t;
+    };
+    if (m[1] === 'name' && name === '') name = unquote(m[2] ?? '');
+    else if (m[1] === 'description' && description === '') description = unquote(m[2] ?? '');
+  }
+  if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX) return null;
+  if (description === '' || description.length > 1024) return null;
+  return { name, description };
+}
+
+/**
+ * List every discoverable skill for a workdir (R3 §4a): project skill dirs
+ * (`.opencode/skills`, plus `.claude` and `.agents` compat) scanned upward
+ * from the workdir, plus global `~/.config/opencode/skills` and repo `skills/`.
+ * Nearest wins on duplicate names. Never throws — an unreadable tree lists nothing.
+ */
+export function listSkills(workdir: string): SkillEntry[] {
+  const out: SkillEntry[] = [];
+  const seen = new Set<string>();
+  for (const root of skillSearchDirs(workdir)) {
+    let names: string[];
+    try {
+      names = readdirSync(root.dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX || seen.has(name)) continue;
+      const file = join(root.dir, name, 'SKILL.md');
+      let text: string;
+      try {
+        if (!statSync(file).isFile()) continue;
+        text = readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const fm = parseSkillFrontmatter(text);
+      if (!fm || fm.name !== name) continue;
+      seen.add(name);
+      out.push({ name, description: fm.description, source: root.source, dir: join(root.dir, name) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Raw body of one named skill (the full SKILL.md text, capped), or null when
+ * the skill is not discoverable from this workdir. Name-gated: only
+ * well-formed kebab-case names ever hit the filesystem.
+ */
+export function readSkillBody(workdir: string, name: string): string | null {
+  if (!SKILL_NAME_RE.test(name) || name.length > SKILL_NAME_MAX) return null;
+  for (const root of skillSearchDirs(workdir)) {
+    const file = join(root.dir, name, 'SKILL.md');
+    try {
+      if (!statSync(file).isFile()) continue;
+      const text = readFileSync(file, 'utf8');
+      const fm = parseSkillFrontmatter(text);
+      if (!fm || fm.name !== name) continue;
+      return text.length > SKILL_BODY_MAX ? text.slice(0, SKILL_BODY_MAX) : text;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** Parse a stored `skills_used`/draft `skills` JSON array defensively. */
+export function parseSkillNames(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v: unknown = JSON.parse(json);
+    if (!Array.isArray(v)) return [];
+    return v.filter((s): s is string => typeof s === 'string' && SKILL_NAME_RE.test(s)).slice(0, SKILL_PREPEND_MAX);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Compose the skill prefix for a prompt (R3 §4b path ①): one `# Skill: <name>`
+ * section per resolvable pinned skill. Unknown names are skipped silently —
+ * pinning is intent, the file may appear later. Pure composition, no I/O beyond
+ * the skill files themselves.
+ */
+export function prependSkillBodies(workdir: string, prompt: string, skills: string[]): string {
+  const names = skills.filter((s) => SKILL_NAME_RE.test(s)).slice(0, SKILL_PREPEND_MAX);
+  if (names.length === 0) return prompt;
+  const sections: string[] = [];
+  for (const name of names) {
+    const body = readSkillBody(workdir, name);
+    if (body !== null) sections.push(`# Skill: ${name}\n${body}`);
+  }
+  if (sections.length === 0) return prompt;
+  return `${sections.join('\n\n')}\n\n${prompt}`;
+}
 
 export interface Responder {
   streamStart(chatId: number, options?: { mode?: TaskMode; label?: string }): Promise<StreamHandle>;
@@ -411,6 +587,11 @@ export class TaskQueue {
       const sessionId = `${chatId}:${task.id}`;
       this.sessionIds.set(chatId, sessionId);
       const images: string[] = JSON.parse(task.images) as string[];
+      // W4 skills (R3 §4b path ①): pinned SKILL.md bodies are composed onto the
+      // prompt HERE, at execute time — the stored prompt stays raw so retry /
+      // continue never stack the same bodies twice. Plan-turn wrapping applies
+      // first (the plan instruction describes the implementation prompt).
+      const basePrompt = this.planTurns.has(taskId) ? planPrompt(task.prompt) : task.prompt;
       const agentTask: AgentTask = {
         sessionId,
         agent: task.agent as AgentId,
@@ -418,7 +599,7 @@ export class TaskQueue {
         model: s.model,
         // WAVE2/EXEC (plan turn): the stored prompt is the real one; the plan
         // instruction wraps it here so approve can run the original as-is.
-        prompt: this.planTurns.has(taskId) ? planPrompt(task.prompt) : task.prompt,
+        prompt: prependSkillBodies(workdir, basePrompt, parseSkillNames(task.skills_used)),
         images,
         workdir,
         autoApprove: s.autoApprove,

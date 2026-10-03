@@ -2,9 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import type { Server, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { VERSION } from '../version.js';
+import { dispatchApi } from './api.js';
+import type { ApiEnv, ApiResult } from './api.js';
 
 /**
  * W1 foundation: node:http listener + Telegram initData HMAC guard (D8) +
@@ -21,6 +23,12 @@ export interface MiniServerDeps {
   /** Defaults to `<cwd>/web`. Overridable for offline tests. */
   webDir?: string;
   log?: (line: string) => void;
+  /**
+   * W4: live API environment (Store + TaskQueue + Config + boot facts). Absent →
+   * every `/api/*` path 404s AFTER the guard (the W1 posture: auth is proven,
+   * the route simply does not exist in this build).
+   */
+  api?: ApiEnv;
 }
 
 export type AuthError = 'E_AUTH' | 'E_FORBIDDEN' | 'E_STALE';
@@ -127,6 +135,52 @@ function json(res: ServerResponse, status: number, obj: unknown): void {
   res.end(body);
 }
 
+/** POST/PUT body ceiling (§W4 risks): bigger payloads are refused unread. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
+/** Drain a request body up to the ceiling; over it → null (caller sends 413). */
+function readBody(req: IncomingMessage, max = MAX_BODY_BYTES): Promise<Buffer | null> {
+  return new Promise((resolveP) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    req.on('data', (c: Buffer) => {
+      if (done) return;
+      size += c.length;
+      if (size > max) {
+        done = true;
+        resolveP(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (!done) resolveP(Buffer.concat(chunks));
+    });
+    req.on('error', () => {
+      if (!done) {
+        done = true;
+        resolveP(Buffer.concat(chunks));
+      }
+    });
+  });
+}
+
+/** Send a handler result: 304 empty, raw binary, or JSON. */
+function sendApi(res: ServerResponse, r: ApiResult): void {
+  if (r.status === 304) {
+    res.writeHead(304);
+    res.end();
+    return;
+  }
+  if (r.raw !== undefined) {
+    res.writeHead(r.status, { 'content-type': 'application/octet-stream', ...(r.headers ?? {}) });
+    res.end(r.raw);
+    return;
+  }
+  json(res, r.status, r.body ?? null);
+}
+
 export interface MiniServer {
   listen(port: number): Promise<{ port: number }>;
   close(): Promise<void>;
@@ -201,13 +255,62 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
     res.end(body);
   };
 
+  /**
+   * W4 API transport: method gate, 64 КБ body ceiling, JSON parsing, dispatch,
+   * result framing. Handler throws are 500s without stack leaks; the guard
+   * above already proved the caller, so every error here is a JSON `E_*`.
+   */
+  async function serveApi(
+    userId: number,
+    method: string,
+    path: string,
+    query: URLSearchParams,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    if (deps.api === undefined) {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    if (method !== 'GET' && method !== 'POST' && method !== 'PUT') {
+      json(res, 405, { error: 'E_METHOD_NOT_ALLOWED' });
+      return;
+    }
+    let body: unknown;
+    if (method === 'POST' || method === 'PUT') {
+      const buf = await readBody(req);
+      if (buf === null) {
+        json(res, 413, { error: 'E_BODY_TOO_BIG' });
+        return;
+      }
+      const text = buf.toString('utf8').trim();
+      if (text !== '') {
+        try {
+          body = JSON.parse(text) as unknown;
+        } catch {
+          json(res, 400, { error: 'E_BAD_ARG' });
+          return;
+        }
+      }
+    }
+    try {
+      const r = await dispatchApi(deps.api, userId, method, path, query, body);
+      sendApi(res, r);
+    } catch {
+      json(res, 500, { error: 'E_INTERNAL' });
+    }
+  }
+
   function listen(port: number): Promise<{ port: number }> {
     return new Promise((resolveP, rejectP) => {
       const s = createServer((req, res) => {
         const method = req.method ?? 'GET';
         let path = '/';
+        let query = new URLSearchParams();
         try {
-          path = new URL(req.url ?? '/', `http://${BIND_HOST}/`).pathname;
+          const u = new URL(req.url ?? '/', `http://${BIND_HOST}/`);
+          path = u.pathname;
+          query = u.searchParams;
         } catch {
           json(res, 404, { error: 'E_NOT_FOUND' });
           return;
@@ -227,6 +330,10 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
         const verdict = verifyInitData(raw, deps.botToken, deps.allowedChatIds);
         if (!verdict.ok) {
           json(res, verdict.status, { error: verdict.error });
+          return;
+        }
+        if (path === '/api/health' || path.startsWith('/api/')) {
+          void serveApi(verdict.userId, method, path, query, req, res);
           return;
         }
         serveStatic(path, method, res);

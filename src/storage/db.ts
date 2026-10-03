@@ -520,6 +520,92 @@ export class Store {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
   }
 
+  // ----------------------------------- W4 API-shaped readers (explicit columns)
+  //
+  // W3-review constraint: NO `SELECT *` on any path that feeds an HTTP endpoint.
+  // The internal column `tasks.plan_diff_before` (diff content-hash signatures)
+  // must stay invisible — only `consumeTaskPlanDiff` reads it. These readers
+  // project explicit column lists (no `git_before`/`git_after` either: raw
+  // porcelain snapshots are not part of the contract). Existing `SELECT *`
+  // readers above are untouched (chat paths + harnesses depend on them).
+
+  /** Columns the Mini App contract may see (everything except the internals). */
+  private static apiTaskCols(): string {
+    return [
+      'id',
+      'chat_id',
+      'agent',
+      'mode',
+      'prompt',
+      'images',
+      'status',
+      'cost_usd',
+      'plan_text',
+      'preset',
+      'title',
+      'model',
+      'project',
+      'skills_used',
+      'rev',
+      'plan_origin',
+      'plan_reworks',
+      'git_base_sha',
+      'files_summary',
+      'created_at',
+      'finished_at',
+    ].join(', ');
+  }
+
+  /** Single task as the API may see it (chat scoping is the caller's job). */
+  getTaskApi(id: number): TaskRow | undefined {
+    return this.db
+      .prepare(`SELECT ${Store.apiTaskCols()} FROM tasks WHERE id = ?`)
+      .get(id) as TaskRow | undefined;
+  }
+
+  /** Newest-first page for `GET /api/tasks/recent` (narrow projection). */
+  recentTasksApi(
+    chatId: number,
+    limit: number,
+    offset: number,
+  ): Pick<
+    TaskRow,
+    'id' | 'title' | 'agent' | 'model' | 'project' | 'mode' | 'status' | 'cost_usd' | 'created_at' | 'finished_at'
+  >[] {
+    return this.db
+      .prepare(
+        `SELECT id, title, agent, model, project, mode, status, cost_usd, created_at, finished_at
+         FROM tasks WHERE chat_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      )
+      .all(chatId, limit, offset) as Pick<
+      TaskRow,
+      'id' | 'title' | 'agent' | 'model' | 'project' | 'mode' | 'status' | 'cost_usd' | 'created_at' | 'finished_at'
+    >[];
+  }
+
+  /** Running task as the API may see it. */
+  runningTaskApi(chatId: number): TaskRow | undefined {
+    return this.db
+      .prepare(`SELECT ${Store.apiTaskCols()} FROM tasks WHERE chat_id = ? AND status = 'running' ORDER BY id ASC LIMIT 1`)
+      .get(chatId) as TaskRow | undefined;
+  }
+
+  /** Oldest pending task as the API may see it. */
+  oldestPendingApi(chatId: number): TaskRow | undefined {
+    return this.db
+      .prepare(`SELECT ${Store.apiTaskCols()} FROM tasks WHERE chat_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1`)
+      .get(chatId) as TaskRow | undefined;
+  }
+
+  /** Parked plan as the API may see it. */
+  awaitingPlanApi(chatId: number): TaskRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT ${Store.apiTaskCols()} FROM tasks WHERE chat_id = ? AND status = 'awaiting_plan' ORDER BY id ASC LIMIT 1`,
+      )
+      .get(chatId) as TaskRow | undefined;
+  }
+
   oldestPending(chatId: number): TaskRow | undefined {
     return this.db
       .prepare("SELECT * FROM tasks WHERE chat_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1")
