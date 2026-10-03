@@ -77,7 +77,20 @@ function ask(bot: Bot, deps: Deps, chatId: number, prompt: string, mode: 'ask' |
 // One pending-files map for every inbound kind (photo/document/audio/video), so the
 // shared handlers below cannot drift. The queue's `images: string[]` field carries
 // arbitrary absolute paths, so documents and images ride the same field.
-const pendingFiles = new Map<number, string[]>();
+const pendingFiles = new Map<number, PendingEntry>();
+
+/** Inbound files live on disk (`<workdir>/inbox`); this map only remembers them. */
+interface PendingEntry {
+  /** Absolute paths saved for the next task. */
+  paths: string[];
+  /** `Date.now()` at receive time — entries older than the TTL are dropped. */
+  addedAt: number;
+  /** Owning chat: `takeImages(chatId)` only ever returns its own entry. */
+  chatId: number;
+}
+
+/** Inbox entries older than this are dropped on read (24 h, W2). */
+export const PENDING_FILES_TTL_MS = 24 * 3600 * 1000;
 
 /**
  * The live Bot, captured by `registerRouter`. `src/index.ts` builds Deps in two
@@ -91,10 +104,38 @@ function requireBot(): Bot {
   return liveBot;
 }
 
-function takeImages(chatId: number): string[] {
-  const files = pendingFiles.get(chatId) ?? [];
+export function takeImages(chatId: number): string[] {
+  sweepPendingFiles();
+  const entry = pendingFiles.get(chatId);
   pendingFiles.delete(chatId);
-  return files;
+  if (!entry || entry.chatId !== chatId) return [];
+  return entry.paths;
+}
+
+/**
+ * Remember inbound files for the next task. Exported so the W2 harness can
+ * prove TTL + ownership offline; `receiveInboundFile` delegates here.
+ */
+export function rememberInboundFiles(chatId: number, paths: string[]): void {
+  sweepPendingFiles();
+  const prev = pendingFiles.get(chatId);
+  const kept = prev && prev.chatId === chatId ? prev.paths : [];
+  pendingFiles.set(chatId, { paths: [...kept, ...paths], addedAt: Date.now(), chatId });
+}
+
+/**
+ * Drop inbox entries older than 24 h. Files already live on disk — only the
+ * "attach to next task" memory is forgotten. Returns entries dropped.
+ */
+export function sweepPendingFiles(nowMs = Date.now()): number {
+  let dropped = 0;
+  for (const [chatId, entry] of pendingFiles) {
+    if (nowMs - entry.addedAt > PENDING_FILES_TTL_MS) {
+      pendingFiles.delete(chatId);
+      dropped += 1;
+    }
+  }
+  return dropped;
 }
 
 /** `/find` — how many history hits to render at most, and how long a needle may be. */
@@ -123,9 +164,7 @@ async function receiveInboundFile(
     join(workdir, 'inbox'),
     inboxFilename(suggestedName),
   );
-  const list = pendingFiles.get(chatId) ?? [];
-  list.push(abs);
-  pendingFiles.set(chatId, list);
+  rememberInboundFiles(chatId, [abs]);
   deps.store.addMessage(chatId, 'user', `[file saved: ${abs}] ${caption}`.trim());
   const name = displayName(abs);
   await deps.io.notify(
@@ -636,8 +675,9 @@ export function createResponder(bot: Bot): Responder {
     askApproval: async (chatId, command) => {
       const { requestApproval } = await import('../core/approvals.js');
       // Register the pending promise BEFORE sending the keyboard, so a fast tap
-      // cannot race the approval into "нечего подтверждать".
-      const pending = requestApproval(chatId);
+      // cannot race the approval into "нечего подтверждать". The command lands
+      // in the durable row so the Mini App can show it after a restart (W2).
+      const pending = requestApproval(chatId, command);
       await bot.api.sendMessage(
         chatId,
         `Агент хочет выполнить:\n<pre>${escapeHtml(command)}</pre>\n\nНажми кнопку или /approve — разрешить, /cancel — отклонить`,
