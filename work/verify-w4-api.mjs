@@ -412,6 +412,11 @@ g('AC4: retry new id same prompt; continue new id new prompt same project');
   assert(ct.json?.prompt === 'follow-up text', 'continue uses the new prompt');
   const bad = await jpost(`/api/tasks/${draftTaskId}/continue`, { text: '' });
   assert(bad.status === 400 && bad.json?.error === 'E_BAD_ARG', 'continue with empty text -> 400');
+  const typo = await jpost(`/api/tasks/${draftTaskId}/continue`, { text: 'hi', txt: 'oops' });
+  assert(
+    typo.status === 400 && typo.json?.error === 'E_BAD_ARG' && typeof typo.json?.detail === 'string' && typo.json.detail.includes('txt'),
+    `continue with unknown key -> 400 E_BAD_ARG naming txt (got ${typo.status}/${typo.json?.detail})`,
+  );
   const unk = await jpost('/api/tasks/999999/retry', {});
   assert(unk.status === 404, 'retry unknown task -> 404');
   // Long prompt: title clamped to 60 chars server-side.
@@ -488,6 +493,11 @@ g('AC5: plan lifecycle reachable from the API (no store fixture)');
   assert(dp !== null && dp.plan.length > 0, 'confirm produced a real parked plan');
   const noComment = await jpost(`/api/plan/${dp.task_id}/rework`, {});
   assert(noComment.status === 400, 'rework without a comment -> 400');
+  const typoRw = await jpost(`/api/plan/${dp.task_id}/rework`, { comment: 'more detail', commnet: 'typo' });
+  assert(
+    typoRw.status === 400 && typoRw.json?.error === 'E_BAD_ARG' && typeof typoRw.json?.detail === 'string' && typoRw.json.detail.includes('commnet'),
+    `rework with unknown key -> 400 E_BAD_ARG naming commnet (got ${typoRw.status}/${typoRw.json?.detail})`,
+  );
   await jpost(`/api/plan/${dp.task_id}/approve`, {});
   await drain();
 }
@@ -593,6 +603,29 @@ g('M2/M3: confirm/retry/continue run the CONTEXT THEY NAMED, not the session');
   assert(ctask2.json?.prompt === 'follow-up' && ctask2.json?.project === projA, `continue runs in the SOURCE project too (got ${ctask2.json?.project})`);
   await api('PUT', '/api/settings', { body: { project: '' } });
   await drain();
+}
+
+/* ---------------- M2-empty: an empty card context survives session drift ------ */
+g('M2-empty: empty card model/project stay "" after drift (no session fallback)');
+{
+  // Chat OTHER is still pristine here (its first use is the M4 probe below),
+  // so its session is the default: model "" project "".
+  const card = await jpost('/api/drafts', { prompt: 'empty card ctx', mode: 'code' }, 'other');
+  assert(card.json?.draft?.model === '' && card.json?.draft?.project === '', 'pristine card snapshots "" model/project verbatim');
+  // Drift OTHER's session, then confirm: the row must keep the card's "".
+  const projE = join(workRoot, 'projE');
+  mkdirSync(projE, { recursive: true });
+  await api('PUT', '/api/settings', { auth: 'other', body: { model: 'drifted-model', project: projE } });
+  const confirmed = await jpost(`/api/drafts/${card.json.draft.id}/confirm`, {}, 'other');
+  assert(confirmed.status === 200, 'empty-card confirm -> 200');
+  const task = await api('GET', `/api/tasks/${confirmed.json.task_id}`, { auth: 'other' });
+  assert(task.json?.model === '', `empty-card task keeps model "" (got ${task.json?.model})`);
+  assert(task.json?.project === '', `empty-card task keeps project "" (got ${task.json?.project})`);
+  for (let i = 0; i < 40; i += 1) {
+    const cur = await jget('/api/tasks/current', 'other');
+    if (cur.json?.running === null && (cur.json?.pending_n ?? 0) === 0) break;
+    await releaseGates();
+  }
 }
 
 /* ---------------- M4: single-use under concurrency, chat scoping, real rev ------ */

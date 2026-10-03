@@ -135,11 +135,6 @@ function agentArg(v: string | null | undefined): AgentId | undefined {
   return typeof v === 'string' && (AGENT_IDS as readonly string[]).includes(v) ? (v as AgentId) : undefined;
 }
 
-/** `''`/`undefined` mean "not set" — let the session decide. */
-function strArg(v: string | null | undefined): string | undefined {
-  return typeof v === 'string' && v !== '' ? v : undefined;
-}
-
 function skillsSummary(store: Store, taskId: number): { changed_n: number; added: number; removed: number } {
   try {
     return store.taskFilesSummary(taskId);
@@ -417,13 +412,16 @@ function confirmDraft(env: ApiEnv, chatId: number, id: number): ApiResult {
   // B1.4 + M2: the STORED card decides — its plan flag and its agent/model/
   // project snapshot. Re-reading the session here is exactly the drift the
   // reviewer measured (draft said model:"" → task ran "drifted-model").
+  // Empty strings pass through VERBATIM: `''` means "not set, no session
+  // fallback" and must survive `??` in queue.submit; mapping them to
+  // `undefined` here would re-arm the session fallback and reintroduce drift.
   const mode = parseMode(fresh.mode) ?? 'ask';
   const state = env.queue.submit(chatId, fresh.prompt, TASK_MODE[mode], [], {
     skills: skillsOf(fresh.skills),
     planOnly: fresh.plan === 1 || mode === 'plan',
     agent: agentArg(fresh.agent),
-    model: strArg(fresh.model),
-    project: strArg(fresh.project),
+    model: fresh.model,
+    project: fresh.project,
   });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId), state } };
 }
@@ -467,12 +465,14 @@ async function stopTask(env: ApiEnv, chatId: number, id: number): Promise<ApiRes
 }
 
 /** Run context of the source row for retry/continue (M3): agent/model/project
- *  "at launch", never the current session (§5.1 item 12: "в том же project"). */
-function sourceContext(row: TaskRow): { agent: AgentId | undefined; model: string | undefined; project: string | undefined } {
+ *  "at launch", never the current session (§5.1 item 12: "в том же project").
+ *  `model`/`project` pass through VERBATIM — `''` is kept by `??` in
+ *  queue.submit (no session fallback), while `undefined` would fall back. */
+function sourceContext(row: TaskRow): { agent: AgentId | undefined; model: string; project: string } {
   return {
     agent: agentArg(row.agent),
-    model: strArg(row.model),
-    project: strArg(row.project),
+    model: row.model,
+    project: row.project,
   };
 }
 
@@ -490,6 +490,9 @@ function retryTask(env: ApiEnv, chatId: number, id: number): ApiResult {
 function continueTask(env: ApiEnv, chatId: number, id: number, body: unknown): ApiResult {
   const row = scopedTask(env.store, id, chatId);
   if (!row) return err(404, 'E_NO_TASK');
+  // m7: unknown keys are refused, never ignored — a misspelled `text` must 400.
+  const shape = bodyShapeError(body, ['text']);
+  if (shape !== null) return shape;
   const text = (body ?? {}) as { text?: unknown };
   if (!validPrompt(text.text)) return err(400, 'E_BAD_ARG');
   const mode = parseMode(row.mode) ?? 'ask';
@@ -549,6 +552,9 @@ function planApprove(env: ApiEnv, chatId: number, id: number): ApiResult {
 }
 
 function planRework(env: ApiEnv, chatId: number, id: number, body: unknown): ApiResult {
+  // m7: unknown keys are refused, never ignored — a misspelled `comment` must 400.
+  const shape = bodyShapeError(body, ['comment']);
+  if (shape !== null) return shape;
   const comment = (body ?? {}) as { comment?: unknown };
   if (typeof comment.comment !== 'string' || comment.comment.trim() === '' || comment.comment.length > COMMENT_MAX) {
     return err(400, 'E_BAD_ARG');
