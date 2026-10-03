@@ -45,8 +45,9 @@ Design starts in dark (glass reads best there); light ships complete from day on
    Dark, light, and arbitrary custom themes must all work. `prefers-color-scheme` and the
    neutral fallbacks are pre-`ready()` only. Subscribe to `themeChanged` and recompute
    mapping + flat switch + hint guard.
-7. **No animation over 250 ms**, except exactly two: Mini App open (420 ms) and
-   sheet present/dismiss (300 ms). Tab switches are instant (0 ms).
+7. **No animation over 250 ms**, except exactly three: Mini App open (420 ms),
+   sheet present/dismiss (300 ms), and a single 1200 ms skeleton pass
+   (R2 D20; checklist D20, motion.md). Tab switches are instant (0 ms).
 8. **Animate only `transform` and `opacity`** (plus `background-color` on hover/press).
    The single exception: `width` on the bottom-nav indicator (240 ms, same curve).
 9. **Glass filter = `blur()` + optional `saturate()` only.** Never `hue-rotate`, `invert`,
@@ -134,7 +135,7 @@ list: `references/motion.md`.
   mesh gradients, animated gradients.
 - To re-play the Mini App open transition: the Telegram client owns it; we only reveal
   content once on `ready()` (see `references/components.md`).
-- Where `color-mix()` or `animation-timeline` is required but unsupported: serve the
+- Where `animation-timeline` is required but unsupported: serve the
   `@supports` fallback branch, never a broken half-effect.
 
 ## Wiring checklist (JS, from platform research)
@@ -162,10 +163,9 @@ tg?.onEvent("themeChanged", readThemeTokens); // theme.md §3–§4
 // Stable viewport + insets: touch only when stable, or the UI jitters.
 function syncGeometry() {
   root.style.setProperty("--tg-viewport-stable-height", `${tg.viewportStableHeight}px`);
-  const s = tg.safeAreaInset ?? { top: 0, bottom: 0, left: 0, right: 0 };
   const c = tg.contentSafeAreaInset ?? { top: 0, bottom: 0, left: 0, right: 0 };
-  root.style.setProperty("--tg-safe-area-inset-top", `${s.top}px`);
-  root.style.setProperty("--tg-safe-area-inset-bottom", `${s.bottom}px`);
+  // Device inset (notch, home bar) arrives via env(); only Telegram's
+  // content inset needs JS. tokens.css merges both with max().
   root.style.setProperty("--tg-content-safe-area-inset-top", `${c.top}px`);
   root.style.setProperty("--tg-content-safe-area-inset-bottom", `${c.bottom}px`);
 }

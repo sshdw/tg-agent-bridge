@@ -79,8 +79,7 @@ function readThemeTokens() {
   root.dataset.flat = lowContrastBg ? "1" : "";      // collapses glass to solid
 
   const hint = tp.hint_color || (relLum(bg) > 0.45 ? "#707579" : "#8d9aa8");
-  const text = tp.text_color || "#ffffff";
-  // Hint must reach 4.5:1 vs text-on-bg; else use text at 0.72 opacity.
+  // Hint must reach 4.5:1 vs bg; else use text at 0.72 opacity.
   root.dataset.hintOk = contrast(hint, bg) >= 4.5 ? "1" : "0";
 }
 ```
@@ -88,7 +87,6 @@ function readThemeTokens() {
 CSS consequence (in app CSS, next to tokens):
 
 ```css
-.h-caption[data-hint-ok-parent="0"], /* or :root[data-hint-ok="0"] .h-caption */
 :root[data-hint-ok="0"] .h-caption {
   color: var(--ink);
   opacity: 0.72;

@@ -35,8 +35,8 @@
   --ink-section:     var(--tg-theme-section-header-text-color, var(--ink-hint));
   --line:            var(--tg-theme-section-separator-color, var(--hairline-soft));
   --danger:          var(--tg-theme-destructive-text-color, #e5484d);
-  /* --danger fallback #e5484d is a documented DESTRUCTIVE neutral-red,
-   * not an accent: used only for destructive actions (see SKILL.md). */
+  /* --danger fallback #e5484d is a documented DESTRUCTIVE neutral-red
+   * (project token), not an accent: used only for destructive actions. */
 
   /* ---- Accent: theme-mapped ONLY. No fixed accent hex exists. ----
    * accent-action  = primary actions, selected tab, progress
@@ -94,13 +94,13 @@
 
   /* ---- TIER 1 — FLOATING CONTROLS: LIGHT glass ----
    * e.g. floating [Stop] [Details] bar. Second tier, restrained. */
-  --float-tint: rgba(255, 255, 255, 0.08);
+  --float-tint: rgba(255, 255, 255, 0.08); /* project token */
   --float-blur: 20px;
   --float-sat:  160%;
 
   /* ---- TIER 2 — NAVIGATION: STRONG Liquid Glass ----
    * The 4-tab bar only. Maximum glass: full simulation stack. */
-  --nav-tint: rgba(255, 255, 255, 0.12);
+  --nav-tint: rgba(255, 255, 255, 0.12); /* project token */
   --nav-blur: 28px;   /* absolute MAX anywhere */
   --nav-sat:  180%;
 
@@ -119,9 +119,9 @@
    *      nav + floating controls (blur stays PINNED — animating blur
    *      in scroll keyframes is banned, see motion.md) */
   --sim-edge:   rgba(255, 255, 255, 0.28);
-  --sim-edge-dim: rgba(255, 255, 255, 0.12);
+  --sim-edge-dim: rgba(255, 255, 255, 0.12); /* project token */
   --sim-bleed:  rgba(255, 255, 255, 0.05);
-  --sim-tex: linear-gradient(115deg,
+  --sim-tex: linear-gradient(115deg, /* stops are project tokens */
       rgba(255, 255, 255, 0.045) 0%,
       rgba(255, 255, 255, 0.000) 28%,
       rgba(255, 255, 255, 0.060) 50%,
@@ -132,11 +132,12 @@
   --blur-cap: 12px;
   --sat-off: 100%;
 
-  /* ---- Safe area: Telegram vars + env() fallback, merged with max() ----
-   * safeAreaInset (--tg-safe-area-inset-*) = device UI (notch, home bar).
-   * contentSafeAreaInset (--tg-content-safe-area-inset-*) = Telegram UI
-   * (its header, native bottom buttons). max() avoids double-counting where
-   * both agree and avoids zero where Telegram reports 0 but iOS does not. */
+  /* ---- Safe area: env() + Telegram content inset, merged with max() ----
+   * Device UI (notch, home bar) arrives via env(safe-area-inset-*).
+   * Telegram UI (its header, native bottom buttons) arrives via JS as
+   * --tg-content-safe-area-inset-* (see SKILL.md wiring). max() avoids
+   * double-counting where both agree and avoids zero where Telegram
+   * reports 0 but iOS does not. */
   --safe-top:    max(env(safe-area-inset-top, 0px),    var(--tg-content-safe-area-inset-top, 0px));
   --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-content-safe-area-inset-bottom, 0px));
   --safe-left:   max(env(safe-area-inset-left, 0px),   var(--tg-content-safe-area-inset-left, 0px));
@@ -284,6 +285,7 @@
  * whole bar parallaxes ≤ 8px. Blur stays PINNED. transform/background
  * only. Full mode only; all other modes force static (performance.md). */
 @keyframes nav-material {
+  /* ±6px parallax + alpha ramp are project tokens; blur stays PINNED */
   from {
     background-color: rgba(255, 255, 255, 0.07);
     transform: translate3d(0, 6px, 0);
@@ -296,13 +298,14 @@
 .glass-nav--reactive {
   animation: nav-material linear both;
   animation-timeline: scroll();
-  animation-range: 0px 240px;
+  animation-range: 0px 240px; /* project token */
   will-change: auto; /* NEVER will-change: filter/opacity — backdrop root */
 }
 .glass-nav--reactive::before { opacity: 0.7; }
 .glass-nav--reactive .glass-tex { background-position: 70% 0; }
 
 @keyframes float-material {
+  /* ±4px parallax + alpha ramp are project tokens; blur stays PINNED */
   from {
     background-color: rgba(255, 255, 255, 0.06);
     transform: translate3d(0, 4px, 0);
@@ -315,7 +318,7 @@
 .glass-float--reactive {
   animation: float-material linear both;
   animation-timeline: scroll();
-  animation-range: 0px 200px;
+  animation-range: 0px 200px; /* project token */
   will-change: auto;
 }
 
@@ -414,14 +417,14 @@ body {
  * ========================================================================== */
 
 :root[data-scheme="light"] {
-  --float-tint:        rgba(255, 255, 255, 0.55);
-  --nav-tint:          rgba(255, 255, 255, 0.72);
+  --float-tint:        rgba(255, 255, 255, 0.55); /* project token */
+  --nav-tint:          rgba(255, 255, 255, 0.72); /* project token */
   --glass-scrim:       rgba(0, 0, 0, 0.35);
   --hairline:          rgba(0, 0, 0, 0.10);
   --hairline-soft:     rgba(0, 0, 0, 0.06);
-  --sim-edge:          rgba(255, 255, 255, 0.65);
-  --sim-edge-dim:      rgba(255, 255, 255, 0.28);
-  --sim-bleed:         rgba(255, 255, 255, 0.10);
+  --sim-edge:          rgba(255, 255, 255, 0.65); /* project token */
+  --sim-edge-dim:      rgba(255, 255, 255, 0.28); /* project token */
+  --sim-bleed:         rgba(255, 255, 255, 0.10); /* project token */
   --elev-1: 0 1px 2px rgba(16, 24, 34, 0.10), 0 4px 16px rgba(16, 24, 34, 0.08);
   --elev-2: 0 2px 6px rgba(16, 24, 34, 0.14), 0 12px 32px rgba(16, 24, 34, 0.12);
 }
@@ -433,9 +436,9 @@ body {
     --glass-scrim:       rgba(0, 0, 0, 0.35);
     --hairline:          rgba(0, 0, 0, 0.10);
     --hairline-soft:     rgba(0, 0, 0, 0.06);
-    --sim-edge:          rgba(255, 255, 255, 0.65);
-    --sim-edge-dim:      rgba(255, 255, 255, 0.28);
-    --sim-bleed:         rgba(255, 255, 255, 0.10);
+    --sim-edge:          rgba(255, 255, 255, 0.65); /* project token */
+    --sim-edge-dim:      rgba(255, 255, 255, 0.28); /* project token */
+    --sim-bleed:         rgba(255, 255, 255, 0.10); /* project token */
     --elev-1: 0 1px 2px rgba(16, 24, 34, 0.10), 0 4px 16px rgba(16, 24, 34, 0.08);
     --elev-2: 0 2px 6px rgba(16, 24, 34, 0.14), 0 12px 32px rgba(16, 24, 34, 0.12);
   }

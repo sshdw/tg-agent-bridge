@@ -38,7 +38,8 @@ nav-indicator `width` exception below.
     linear(0, 0.079, 0.246, 0.431, 0.6, 0.737, 0.839, 0.911,
            0.958, 0.986, 1.002, 1.009, 1.011, 1.011, 1.009);
 
-  /* Mini App open: 420 ms, ζ=0.86 — the ONLY long animation */
+  /* Mini App open: 420 ms, ζ=0.86 — first of three >250 ms exceptions
+   * (open 420 ms, sheet 300 ms, skeleton single 1200 ms pass — R2 D20) */
   --spring-open:
     linear(0, 0.05, 0.163, 0.302, 0.441, 0.568, 0.677, 0.766,
            0.836, 0.889, 0.928, 0.957, 0.976, 0.989, 0.997,
@@ -64,7 +65,7 @@ nav-indicator `width` exception below.
 | Sheet present | 300 ms | `--spring-sheet` | Layer change earns extra time |
 | Sheet dismiss | 300 ms | `--ease-in` | Plain curve on the way out |
 | Tab screen switch | 0 ms — instant | — | Frequent interaction, no motion (HIG) |
-| Mini App open reveal | 420 ms | `--spring-open` | **Only exception to the ≤ 250 ms rule** |
+| Mini App open reveal | 420 ms | `--spring-open` | **First of three exceptions to the ≤ 250 ms rule** (with sheet 300 ms + skeleton single 1200 ms pass, R2 D20) |
 | Parallax / scroll-linked | scroll-driven, no duration | `animation-timeline` | Duration comes from the scroll |
 
 Rule (Apple HIG Motion): anything the user can trigger repeatedly in one
@@ -125,6 +126,5 @@ thing has no "mass" (opacity, color, background, content).
    single 1200 ms pass, max one per group).
 7. **Scroll-driven `backdrop-filter` animation is banned by default** (it
    violates the transform/opacity-only rule and doubles frame cost on feeds).
-   The scroll-reactive card animates `transform` ±6px and `background-color`
-   only; any `blur()` keyframes are a full-mode-only experiment for 1–2
-   hero cards — see `components.md`.
+   Scroll-linked effects animate `transform` and `background-color` only, on
+   nav + floating controls only; blur stays pinned.

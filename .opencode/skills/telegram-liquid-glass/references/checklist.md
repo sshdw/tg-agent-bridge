@@ -94,10 +94,12 @@ Fail any item → fix before merge.
 
 ## Motion
 
-- [ ] **D12.** No animation longer than **250 ms** except Mini App open (420 ms,
-  `--spring-open`) and sheet present/dismiss (300 ms). Grep all
+- [ ] **D12.** No animation longer than **250 ms** except exactly three: Mini App open (420 ms,
+  `--spring-open`), sheet present/dismiss (300 ms), and a single 1200 ms
+  skeleton pass (R2 D20; see D20). Grep all
   `transition(-duration)?` / `animation(-duration)?` values and assert each ≤
-  250 ms unless the selector is `.app[data-ready]` or `.sheet`.
+  250 ms unless the selector is `.app[data-ready]`, `.sheet`, or a
+  single-pass `.skeleton`.
 - [ ] **D13.** No `animation-iteration-count: infinite` anywhere. Grep:
   `infinite` must return nothing in app CSS.
 - [ ] **D14.** No stagger on lists; `animation-delay` total ≤ **100 ms**, ≤ **3**
@@ -117,7 +119,7 @@ Fail any item → fix before merge.
   `particle|bokeh|noise\.png` must return nothing.
 - [ ] **D19.** No living wallpapers, video backgrounds, mesh gradients. Grep:
   `<video.*background|mesh-gradient` must return nothing.
-- [ ] **D20.** Skeletons do not blink: `animation: none` or a single 1200 ms
+- [ ] **D20.** Skeletons do not blink (R2 D20): `animation: none` or a single 1200 ms
   pass, max one animated skeleton per group.
 
 ## Performance modes (D3) — all three verified

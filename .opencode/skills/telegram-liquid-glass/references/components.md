@@ -162,25 +162,29 @@ a { color: var(--accent-text); }                                             /* 
 ## 2. Floating [Stop] [Details] bar (light glass, scroll-reactive)
 
 Second glass tier. Light tint, pinned blur, scroll-linked material ramp
-(`float-material` in tokens.css: tint alpha + ±4px parallax, transform and
-background-color only). Max one per screen, full mode only, never inside
+(`float-material` in tokens.css: tint alpha + ±4px parallax — project
+tokens — transform and background-color only). Max one per screen, full mode only, never inside
 long feeds. Reduced/lite modes render it as a flat pill (tokens.css).
 
 ```css
 .float-bar {
   position: fixed;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+  width: fit-content; /* centred without transform: the --reactive
+    scroll animation drives transform (parallax ±4px), which would
+    override a translateX(-50%) centring rule while it applies */
   bottom: calc(72px + var(--safe-bottom) + 12px); /* clears the 64px nav */
   display: flex;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
-  z-index: 20;
+  z-index: 20; /* project token */
 }
 .float-bar--reactive {
   animation: float-material linear both;
   animation-timeline: scroll();
-  animation-range: 0px 200px;
+  animation-range: 0px 200px; /* project token */
 }
 /* Mandatory fallbacks: animation-timeline in WebViews is UNVERIFIED. */
 @supports not (animation-timeline: scroll()) {
@@ -209,7 +213,7 @@ client draws it. Never replay "opening" or you get a double animation
 
 .app[data-ready="1"] {
   opacity: 1;
-  animation: miniapp-open 420ms var(--spring-open) both; /* the only >250 ms enter */
+  animation: miniapp-open 420ms var(--spring-open) both; /* a >250 ms exception (rule 7) */
 }
 
 @keyframes miniapp-open {

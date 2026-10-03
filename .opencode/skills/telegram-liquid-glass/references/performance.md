@@ -54,7 +54,7 @@ function readTelegramPerfClass() {
   return v === "LOW" || v === "AVERAGE" || v === "HIGH" ? v : null;
 }
 
-function autoPerf() {
+async function autoPerf() {
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return "lite";
   const uaClass = readTelegramPerfClass();
   if (uaClass === "LOW") return "lite";
@@ -62,19 +62,17 @@ function autoPerf() {
 
   // JS-side heuristic: memory, cores, pixel cost, measured frame budget.
   let score = 0;
-  if ((navigator.deviceMemory ?? 8) <= 4) score += 2;       // GB RAM bucket
-  if ((navigator.hardwareConcurrency ?? 8) <= 4) score += 2; // weak CPU
-  if ((window.devicePixelRatio ?? 1) >= 3) score += 1;        // blur cost ∝ pixels
-  if (uaClass === null) score += 0;                          // unknown ≠ weak
+  if ((navigator.deviceMemory ?? 8) <= 4) score += 2;       // GB RAM bucket (project threshold)
+  if ((navigator.hardwareConcurrency ?? 8) <= 4) score += 2; // weak CPU (project threshold)
+  if ((window.devicePixelRatio ?? 1) >= 3) score += 1;        // blur cost ∝ pixels (project threshold)
   // Measured frame budget: median rAF delta over 30 frames, UNVERIFIED
   // threshold until real-device validation (R2 §7.1) — 24ms is a project
   // constant, not a Telegram value.
-  return measureFrameBudget().then(avgMs => {
-    if (avgMs > 24) score += 2;
-    if (score >= 3) return "lite";
-    if (score >= 1 || uaClass === "AVERAGE") return "reduced";
-    return "full";
-  });
+  const avgMs = await measureFrameBudget();
+  if (avgMs > 24) score += 2;
+  if (score >= 3) return "lite";
+  if (score >= 1 || uaClass === "AVERAGE") return "reduced";
+  return "full";
 }
 
 function measureFrameBudget() {
