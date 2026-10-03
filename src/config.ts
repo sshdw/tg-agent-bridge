@@ -70,8 +70,11 @@ function num(key: string, fallback: number): number {
  * shim is on PATH. npm installs `opencode`, `opencode.cmd` and `opencode.ps1`
  * side by side; `spawn('opencode')` finds none of them without a shell, so we
  * prefer the `.cmd` we can prove exists. Explicit env overrides always win.
+ *
+ * Exported because `gateway/models.ts` must spawn the SAME binary the agent runs:
+ * `opencode models` is useless if it shells out to a different opencode install.
  */
-function resolveBin(override: string, fallback: string): string {
+export function resolveBin(override: string, fallback: string): string {
   if (override !== '') return override;
   if (process.platform !== 'win32') return fallback;
   const dirs = (process.env.PATH ?? '').split(';').filter((d) => d.trim() !== '');

@@ -231,15 +231,18 @@ export const TELEGRAM_MARKER = '[via Telegram]';
  * Appended to every Telegram-originated prompt. Keeps replies readable on a phone:
  * short paragraphs, key points first, fenced code, no giant headings.
  *
- * The no-tables rule is not cosmetic: Telegram's HTML mode has no table markup, so a
- * pipe table degrades into a wrapped wall of `|` characters on a narrow screen. The
- * renderer does convert tables it recognises (see `renderTable` in
- * `telegram/markdown.ts`), but it has to guess where a borderless table ends, so
- * asking for a list removes the guesswork entirely.
+ * Tables: Bot API 10.1 renders pipe tables natively as block tables, so the previous
+ * blanket "never use tables" rule was solving a problem that no longer exists. What
+ * remains is a WIDTH problem, which is about the phone and not the protocol: an
+ * eight-column table is unreadable at any render quality. So the rule is now "few
+ * columns, or a bullet list instead" — which also keeps the HTML fallback path
+ * (`renderTable` in `telegram/markdown.ts`) able to do its job for older Telegram
+ * servers and clients.
  */
 export const TELEGRAM_SYSTEM_LINE =
   'Reply concise and Telegram-friendly: short paragraphs, key points first, code in fenced blocks, no giant headers. ' +
-  'Never use markdown tables — Telegram cannot render them; use a bullet list with "Name: value" lines instead.';
+  'Markdown tables are rendered by Telegram, but a table must stay phone-readable: a few columns at most, ' +
+  'and prefer a bullet list with "Name: value" lines whenever the table would be wider than a phone screen.';
 
 /**
  * The attachment protocol, documented where the agent actually reads instructions.
