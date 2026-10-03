@@ -57,8 +57,25 @@ export const COMMENT_MAX = 2000;
 export const PREVIEW_MAX = 64 * 1024;
 /** Binary probe window (NUL byte in the head means "not text"). */
 const BINARY_PROBE = 8192;
+/** §5.1 line 298: heartbeat older than this ⇒ the UI shows "бот недоступен". */
+export const HEARTBEAT_STALE_S = 90;
 /** Persistence for the skills `auto` flag inside `skill_pins` (no schema change). */
 export const SKILLS_AUTO_SENTINEL = '__auto__';
+
+/**
+ * Path separator contract (m11): `abs` is the OS-native absolute path exactly as
+ * the resolver produced it (`D:\…` on Windows) — it is what the owner copies
+ * and what the guard proved, so it is never rewritten. `entries[].rel` and every
+ * task-relative `path` are ALWAYS forward-slash (`src/a.ts`); W6 builds links
+ * from `rel` and displays `abs` verbatim.
+ */
+
+/** JSON booleans everywhere, never 0/1 (m2): `truncated`/`binary` in
+ * `/api/tasks/:id/files`, `truncated` in `/api/tasks/:id/diff` and
+ * `/api/files/{preview,diff}`. §5.1 line 314 writes `0` for one and line 315
+ * writes `false` for another — the document contradicts itself; BOOLEAN is the
+ * choice, and the per-row `binary` flag is contracted here (a binary row has no
+ * diff at all, so the list must say so instead of making W6 fetch a 404). */
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 const elapsedOf = (createdAt: number): number => Math.max(0, nowSec() - createdAt);
@@ -84,6 +101,43 @@ const titleOf = (row: { title: string | null; prompt: string }): string => row.t
 
 function err(status: number, error: string, extra?: Record<string, unknown>): ApiResult {
   return { status, body: { error, ...(extra ?? {}) } };
+}
+
+/**
+ * Body keys a write endpoint accepts. Unknown keys are REFUSED (m7), never
+ * ignored: a client that misspells `skills` or sends an option this build does
+ * not implement must learn about it from a 400, not from a silently different
+ * run. `plan` is deliberately absent — the canonical trigger is `mode:"plan"`
+ * (BLOCKER 1), so `{plan:true}` is an unknown field with a pointed hint.
+ */
+function unknownKey(body: Record<string, unknown>, allowed: readonly string[]): string | null {
+  for (const k of Object.keys(body)) {
+    if (!allowed.includes(k)) return k;
+  }
+  return null;
+}
+
+function bodyShapeError(body: unknown, allowed: readonly string[]): ApiResult | null {
+  if (body === undefined || body === null) return null;
+  if (typeof body !== 'object' || Array.isArray(body)) return err(400, 'E_BAD_ARG', { detail: 'body must be an object' });
+  const bad = unknownKey(body as Record<string, unknown>, allowed);
+  if (bad === null) return null;
+  return err(400, 'E_BAD_ARG', {
+    detail:
+      bad === 'plan'
+        ? 'use mode:"plan" — the boolean "plan" field is not part of the contract'
+        : `unknown field: ${bad}`,
+  });
+}
+
+/** Agent id from a stored string, undefined when it is not a known agent. */
+function agentArg(v: string | null | undefined): AgentId | undefined {
+  return typeof v === 'string' && (AGENT_IDS as readonly string[]).includes(v) ? (v as AgentId) : undefined;
+}
+
+/** `''`/`undefined` mean "not set" — let the session decide. */
+function strArg(v: string | null | undefined): string | undefined {
+  return typeof v === 'string' && v !== '' ? v : undefined;
 }
 
 function skillsSummary(store: Store, taskId: number): { changed_n: number; added: number; removed: number } {
@@ -123,8 +177,35 @@ function scopedTask(store: Store, id: number, chatId: number): TaskRow | undefin
   return row;
 }
 
-function parseMode(v: unknown): TaskMode | null {
-  return v === 'ask' || v === 'code' ? v : null;
+/**
+ * The canonical run mode as it travels on the wire: `ask` | `code` | `plan`.
+ *
+ * `plan` is the ONE canonical plan trigger (fix-round decision for BLOCKER 1):
+ * it rides the existing contract field `mode` instead of adding a second,
+ * silently-ignorable flag. It maps to `TaskMode 'code'` + `planOnly: true`,
+ * because `TaskMode` is frozen at `'ask' | 'code'` (`src/gateway/types.ts:3`)
+ * and the plan TURN, not the mode string, is what parks the task.
+ */
+type WireMode = 'ask' | 'code' | 'plan';
+
+function parseMode(v: unknown): WireMode | null {
+  if (v === 'ask' || v === 'code' || v === 'plan') return v;
+  return null;
+}
+
+const TASK_MODE: Record<WireMode, TaskMode> = { ask: 'ask', code: 'code', plan: 'code' };
+
+/** Shared `mode` + `skills` validation for `POST /api/drafts` and `/api/tasks`. */
+function parseRunBody(body: unknown): { prompt: string; mode: WireMode; skills: string[] } | ApiResult {
+  const shape = bodyShapeError(body, ['prompt', 'mode', 'skills']);
+  if (shape !== null) return shape;
+  const b = (body ?? {}) as { prompt?: unknown; mode?: unknown; skills?: unknown };
+  if (!validPrompt(b.prompt)) return err(400, 'E_BAD_ARG');
+  const mode = b.mode === undefined ? 'ask' : parseMode(b.mode);
+  if (mode === null) return err(400, 'E_BAD_ARG');
+  const skills = parseSkills(b.skills);
+  if (skills === null) return err(400, 'E_BAD_ARG');
+  return { prompt: b.prompt, mode, skills };
 }
 
 function parseSkills(v: unknown): string[] | null {
@@ -171,9 +252,12 @@ function outboundError(e: unknown): ApiResult {
 
 async function getHealth(env: ApiEnv, chatId: number): Promise<ApiResult> {
   const { cfg, store } = env;
-  let db = 'wal';
+  // m9: real probes, not literals. `db` is the live journal mode, and the two
+  // liveness numbers are the same signals W1's guard-side code uses.
+  let db = 'error';
   let pending = 0;
   try {
+    db = store.journalMode();
     pending = store.pendingCount(chatId);
   } catch {
     db = 'error';
@@ -185,6 +269,12 @@ async function getHealth(env: ApiEnv, chatId: number): Promise<ApiResult> {
   } catch {
     stale = null;
   }
+  // The API has no handle on the grammy loop (W1 owns it, `src/index.ts` is not
+  // part of this module), so "polling alive" is derived from the SAME heartbeat
+  // the Mini App already treats as the liveness signal: fresh ⇒ this process is
+  // up and ticking ⇒ polling; missing or >90 s stale ⇒ `stale`/`unknown`, which
+  // is what §5.1 line 298 tells the UI to render as "бот недоступен".
+  const telegram = stale === null ? 'unknown' : stale > HEARTBEAT_STALE_S ? 'stale' : 'polling';
   const whisperReady =
     cfg.whisperBin !== '' && cfg.voiceModelPath !== '' && existsSync(cfg.whisperBin) && existsSync(cfg.voiceModelPath);
   return {
@@ -194,7 +284,7 @@ async function getHealth(env: ApiEnv, chatId: number): Promise<ApiResult> {
       version: VERSION,
       sha: apiSha(),
       uptime_s: Math.max(0, Math.floor((Date.now() - env.startTimeMs) / 1000)),
-      telegram: 'polling',
+      telegram,
       agent: cfg.opencodeBin !== '' ? `opencode:${cfg.opencodeBin}` : 'missing',
       github: cfg.githubToken !== '' ? 'present' : 'absent',
       whisper: whisperReady ? 'ready' : 'missing',
@@ -248,7 +338,10 @@ function getRecent(env: ApiEnv, chatId: number, query: URLSearchParams): ApiResu
     body: {
       tasks: page.map((t) => ({
         id: t.id,
-        title: t.title ?? '',
+        // m1: same 60-char, surrogate-safe title as the detail view. The SQL
+        // fallback (`COALESCE(NULLIF(title,''), substr(prompt,1,60))`) covers
+        // pre-W3 rows; `taskTitle` keeps the clamp identical to `taskView`.
+        title: taskTitle(t.title ?? ''),
         agent: t.agent,
         model: t.model,
         project: t.project,
@@ -276,14 +369,21 @@ function getTask(env: ApiEnv, chatId: number, id: number, query: URLSearchParams
 }
 
 function postDrafts(env: ApiEnv, chatId: number, body: unknown): ApiResult {
-  const b = (body ?? {}) as { prompt?: unknown; mode?: unknown; skills?: unknown };
-  if (!validPrompt(b.prompt)) return err(400, 'E_BAD_ARG');
-  const mode = b.mode === undefined ? 'ask' : parseMode(b.mode);
-  if (mode === null) return err(400, 'E_BAD_ARG');
-  const skills = parseSkills(b.skills);
-  if (skills === null) return err(400, 'E_BAD_ARG');
+  const parsed = parseRunBody(body);
+  if ('status' in parsed) return parsed;
   const s = getOrCreate(env.store, env.cfg, chatId);
-  const id = env.store.createDraft(chatId, b.prompt, mode, s.agent, s.model, s.project, skills);
+  // The card snapshots the run context AND the plan intent: `confirm` must run
+  // what the owner saw, even if `PUT /api/settings` moved the session on (M2).
+  const id = env.store.createDraft(
+    chatId,
+    parsed.prompt,
+    parsed.mode,
+    s.agent,
+    s.model,
+    s.project,
+    parsed.skills,
+    parsed.mode === 'plan',
+  );
   const draft = env.store.getDraft(id);
   if (!draft) return err(400, 'E_BAD_ARG');
   return {
@@ -314,8 +414,16 @@ function confirmDraft(env: ApiEnv, chatId: number, id: number): ApiResult {
   // it never starts a second queue.
   const fresh = env.store.getDraft(id);
   if (!fresh) return err(404, 'E_NO_DRAFT');
-  const state = env.queue.submit(chatId, fresh.prompt, (parseMode(fresh.mode) ?? 'ask') as TaskMode, [], {
+  // B1.4 + M2: the STORED card decides — its plan flag and its agent/model/
+  // project snapshot. Re-reading the session here is exactly the drift the
+  // reviewer measured (draft said model:"" → task ran "drifted-model").
+  const mode = parseMode(fresh.mode) ?? 'ask';
+  const state = env.queue.submit(chatId, fresh.prompt, TASK_MODE[mode], [], {
     skills: skillsOf(fresh.skills),
+    planOnly: fresh.plan === 1 || mode === 'plan',
+    agent: agentArg(fresh.agent),
+    model: strArg(fresh.model),
+    project: strArg(fresh.project),
   });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId), state } };
 }
@@ -337,29 +445,44 @@ function discardDraft(env: ApiEnv, chatId: number, id: number): ApiResult {
 }
 
 function postTasks(env: ApiEnv, chatId: number, body: unknown): ApiResult {
-  const b = (body ?? {}) as { prompt?: unknown; mode?: unknown; skills?: unknown };
-  if (!validPrompt(b.prompt)) return err(400, 'E_BAD_ARG');
-  const mode = b.mode === undefined ? 'ask' : parseMode(b.mode);
-  if (mode === null) return err(400, 'E_BAD_ARG');
-  const skills = parseSkills(b.skills);
-  if (skills === null) return err(400, 'E_BAD_ARG');
-  const state = env.queue.submit(chatId, b.prompt, mode, [], { skills });
+  const parsed = parseRunBody(body);
+  if ('status' in parsed) return parsed;
+  // Direct launch (retry/continue templates use the endpoints below): the live
+  // session IS the run context here — there is no card to restore.
+  const state = env.queue.submit(chatId, parsed.prompt, TASK_MODE[parsed.mode], [], {
+    skills: parsed.skills,
+    planOnly: parsed.mode === 'plan',
+  });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId), state } };
 }
 
 async function stopTask(env: ApiEnv, chatId: number, id: number): Promise<ApiResult> {
   if (!scopedTask(env.store, id, chatId)) return err(404, 'E_NO_TASK');
   // Same priority as chat `cancel`: approval → parked plan → running task.
-  const stopped = await env.queue.cancel(chatId);
-  if (stopped === 'nothing') return err(404, 'E_NO_TASK');
-  return { status: 200, body: { stopped, task_id: id } };
+  // M1: echo the id of what ACTUALLY stopped, not the URL id — a `stop` may
+  // address any task while the parked plan is a different one.
+  const { kind, id: stoppedId } = await env.queue.cancel(chatId);
+  if (kind === 'nothing') return err(404, 'E_NO_TASK');
+  return { status: 200, body: { stopped: kind, task_id: stoppedId } };
+}
+
+/** Run context of the source row for retry/continue (M3): agent/model/project
+ *  "at launch", never the current session (§5.1 item 12: "в том же project"). */
+function sourceContext(row: TaskRow): { agent: AgentId | undefined; model: string | undefined; project: string | undefined } {
+  return {
+    agent: agentArg(row.agent),
+    model: strArg(row.model),
+    project: strArg(row.project),
+  };
 }
 
 function retryTask(env: ApiEnv, chatId: number, id: number): ApiResult {
   const row = scopedTask(env.store, id, chatId);
   if (!row) return err(404, 'E_NO_TASK');
-  env.queue.submit(chatId, row.prompt, (parseMode(row.mode) ?? 'ask') as TaskMode, [], {
+  const mode = parseMode(row.mode) ?? 'ask';
+  env.queue.submit(chatId, row.prompt, TASK_MODE[mode], [], {
     skills: skillsOf(row.skills_used),
+    ...sourceContext(row),
   });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId) } };
 }
@@ -369,8 +492,10 @@ function continueTask(env: ApiEnv, chatId: number, id: number, body: unknown): A
   if (!row) return err(404, 'E_NO_TASK');
   const text = (body ?? {}) as { text?: unknown };
   if (!validPrompt(text.text)) return err(400, 'E_BAD_ARG');
-  env.queue.submit(chatId, text.text as string, (parseMode(row.mode) ?? 'ask') as TaskMode, [], {
+  const mode = parseMode(row.mode) ?? 'ask';
+  env.queue.submit(chatId, text.text as string, TASK_MODE[mode], [], {
     skills: skillsOf(row.skills_used),
+    ...sourceContext(row),
   });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId) } };
 }
@@ -562,7 +687,14 @@ function filesDiff(env: ApiEnv, chatId: number, query: URLSearchParams): ApiResu
   if (rel === '' || rel.startsWith('..')) return err(403, 'E_PATH_DENIED');
   const d = unifiedDiff(w.dir, rel);
   if (d.binary) return { status: 200, body: { path, binary: true } };
-  return { status: 200, body: { path, diff: d.diff ?? '', truncated: d.truncated } };
+  // m6: `unifiedDiff` reports a FAILED git (no binary/no git binary/timeout/
+  // not-a-repo) as `diff: null, truncated: true` — indistinguishable from a
+  // real cap, so W6 would badge "truncated" on every file outside a repo.
+  // Say it explicitly instead: `no_git` mirrors `GET /api/tasks/:id/files`.
+  if (d.diff === null) {
+    return { status: 200, body: { path, no_git: true, diff: '', truncated: false } };
+  }
+  return { status: 200, body: { path, diff: d.diff, truncated: d.truncated, no_git: false } };
 }
 
 function pickersAgents(env: ApiEnv, chatId: number): ApiResult {
@@ -609,6 +741,8 @@ function getSettings(env: ApiEnv, chatId: number): ApiResult {
 }
 
 function putSettings(env: ApiEnv, chatId: number, body: unknown): ApiResult {
+  const shape = bodyShapeError(body, ['agent', 'model', 'project', 'auto_approve']);
+  if (shape !== null) return shape;
   const b = (body ?? {}) as { agent?: unknown; model?: unknown; project?: unknown; auto_approve?: unknown };
   const patch: { agent?: AgentId; model?: string; project?: string; autoApprove?: boolean } = {};
   let touched = false;
@@ -673,6 +807,8 @@ function getSkills(env: ApiEnv, chatId: number): ApiResult {
 }
 
 function putSkills(env: ApiEnv, chatId: number, body: unknown): ApiResult {
+  const shape = bodyShapeError(body, ['pins', 'auto']);
+  if (shape !== null) return shape;
   const b = (body ?? {}) as { pins?: unknown; auto?: unknown };
   if (b.pins !== undefined && !Array.isArray(b.pins)) return err(400, 'E_BAD_ARG');
   if (b.auto !== undefined && typeof b.auto !== 'boolean') return err(400, 'E_BAD_ARG');

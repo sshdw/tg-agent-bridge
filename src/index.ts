@@ -120,7 +120,21 @@ async function main(): Promise<void> {
   // node:http listener on loopback only.
   const stopHeartbeat = startHeartbeat(join(dataDir, 'heartbeat'), 30000, log);
   await wireMenuButton(bot.api, cfg.miniUrl, cfg.allowedChatIds, log);
-  const mini = createMiniServer({ botToken: cfg.botToken, allowedChatIds: cfg.allowedChatIds, log });
+  // W4: hand the live Store/TaskQueue/Config to the HTTP layer. Without `api`
+  // the guard would still pass and every `/api/*` path would 404 — the Mini App
+  // contract only exists if the real environment is injected here.
+  const mini = createMiniServer({
+    botToken: cfg.botToken,
+    allowedChatIds: cfg.allowedChatIds,
+    log,
+    api: {
+      cfg,
+      store,
+      queue: deps.queue,
+      startTimeMs: Date.now(),
+      heartbeatPath: join(dataDir, 'heartbeat'),
+    },
+  });
   try {
     await mini.listen(cfg.miniPort);
   } catch (err) {

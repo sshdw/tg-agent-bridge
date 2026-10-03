@@ -29,10 +29,33 @@ export interface SubmitOptions {
   planOnly?: boolean;
   /** Pinned skill names attached at launch (W3: stored as `skills_used`). */
   skills?: string[];
+  /**
+   * W4 (M2/M3): run context override. The Mini App confirmation card snapshots
+   * agent/model/project, and `retry`/`continue` reproduce the SOURCE task's
+   * context — both must survive a later `PUT /api/settings`, so they are passed
+   * explicitly instead of being re-read from the live session at execute time.
+   * Omitted → today's behaviour exactly (the session decides).
+   */
+  agent?: AgentId;
+  model?: string;
+  project?: string;
 }
 
 /** Caption for files the agent asked to send, shown under an inline photo. */
 export const ATTACH_CAPTION = '📎 Из ответа агента';
+
+/**
+ * What `cancel` stopped. `id` is the row that ACTUALLY changed — never the
+ * caller's guess: §5.1 item 10 requires `task_id` to identify the stopped
+ * resource, and a Mini App `stop` may address any task id while the real target
+ * is a parked plan or a pending approval with a different one (W4 M1).
+ */
+export interface CancelResult {
+  kind: 'approval' | 'task' | 'plan' | 'nothing';
+  /** Row id of the stopped resource; `null` for `nothing` (and for an approval
+   *  with no durable row, impossible while a Store is bound). */
+  id: number | null;
+}
 
 /**
  * W4 skills (R3 §4a/§4b path ①): pinned skill names are stored on the draft/task
@@ -62,11 +85,25 @@ export interface SkillEntry {
 /** Skill search roots for a workdir, nearest first. */
 function skillSearchDirs(workdir: string): { dir: string; source: 'project' | 'global' }[] {
   const out: { dir: string; source: 'project' | 'global' }[] = [];
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  let homeAbs = '';
+  try {
+    homeAbs = home === '' ? '' : resolve(home);
+  } catch {
+    homeAbs = '';
+  }
   try {
     let cur = resolve(workdir);
     for (let depth = 0; depth < 32; depth += 1) {
+      // m12: the user's HOME directory is not a project. When the upward walk
+      // reaches it (every workdir under `~/…` does, and so does every temp
+      // workdir), `~/.opencode/skills` must be reported as `global`, not
+      // `project` — §5.1 item 29 contracts exactly two sources. A project that
+      // merely LIVES under home (`~/dev/app/.opencode/skills`) still walks up
+      // from itself and stays `project`.
+      const atHome = homeAbs !== '' && cur === homeAbs;
       for (const scope of ['.opencode/skills', '.claude/skills', '.agents/skills']) {
-        out.push({ dir: join(cur, scope), source: 'project' });
+        out.push({ dir: join(cur, scope), source: atHome ? 'global' : 'project' });
       }
       const parent = dirname(cur);
       if (parent === cur) break;
@@ -75,8 +112,14 @@ function skillSearchDirs(workdir: string): { dir: string; source: 'project' | 'g
   } catch {
     // unresolvable workdir: fall through to global + repo roots only
   }
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-  if (home !== '') out.push({ dir: join(home, '.config', 'opencode', 'skills'), source: 'global' });
+  // Explicit global roots, for a workdir OUTSIDE home (`D:/projects/…`), where
+  // the upward walk never gets near them. Duplicates of the walk are harmless
+  // (nearest-wins + `seen` in `listSkills`).
+  if (homeAbs !== '') {
+    for (const scope of ['.config/opencode/skills', '.opencode/skills', '.claude/skills', '.agents/skills']) {
+      out.push({ dir: join(homeAbs, scope), source: 'global' });
+    }
+  }
   // Bundled repo skills (`skills/` next to the checkout): project-scoped.
   try {
     out.push({ dir: join(resolve(process.cwd()), 'skills'), source: 'project' });
@@ -337,8 +380,13 @@ export class TaskQueue {
     options: SubmitOptions = {},
   ): 'started' | 'queued' | 'planned' {
     const s = getOrCreate(this.store, this.cfg, chatId);
+    // W4 (M2/M3): an explicit run context wins over the live session — the card
+    // the owner confirmed, or the source task being retried/continued.
+    const agent = options.agent ?? s.agent;
+    const model = options.model ?? s.model;
+    const project = options.project ?? s.project;
     this.store.addMessage(chatId, 'user', prompt);
-    const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
+    const taskId = this.store.createTask(chatId, agent, mode, prompt, images, options.preset ?? '');
     // W3 launch metadata: the ONLY point where the pinned skills are known
     // (the pump later re-reads the row, the options do not survive to it).
     // NOTE (m1): `skills_used` is PINNED INTENT at submit, not observed
@@ -347,8 +395,8 @@ export class TaskQueue {
       this.store.setTaskLaunchMeta(
         taskId,
         taskTitle(prompt),
-        s.model,
-        s.project,
+        model,
+        project,
         JSON.stringify(options.skills ?? []),
       );
     } catch {
@@ -466,18 +514,20 @@ export class TaskQueue {
     return this.waitingFor(chatId) !== undefined;
   }
 
-  async cancel(chatId: number): Promise<'approval' | 'task' | 'plan' | 'nothing'> {
+  async cancel(chatId: number): Promise<CancelResult> {
     // Only a LIVE waiter counts as an approval cancel; an orphaned row is
     // settled as denied inside resolveApproval and cancel falls through.
-    if (resolveApproval(chatId, false) === 'live') return 'approval';
+    // The pending row is read BEFORE the flip so the response can name it.
+    const pendingId = this.store.pendingApproval(chatId)?.id ?? null;
+    if (resolveApproval(chatId, false) === 'live') return { kind: 'approval', id: pendingId };
     const waiting = this.waitingFor(chatId);
     if (waiting) {
       this.planWaiting.delete(chatId);
       this.store.setTaskStatus(waiting.taskId, 'cancelled');
-      return 'plan';
+      return { kind: 'plan', id: waiting.taskId };
     }
     const task = this.store.runningTask(chatId);
-    if (!task || !this.pumping.has(chatId)) return 'nothing';
+    if (!task || !this.pumping.has(chatId)) return { kind: 'nothing', id: null };
     this.store.setTaskStatus(task.id, 'cancelled');
     const sid = this.sessionIds.get(chatId);
     if (sid) {
@@ -488,7 +538,7 @@ export class TaskQueue {
       }
     }
     await this.streams.get(chatId)?.fail('E_CANCELLED');
-    return 'task';
+    return { kind: 'task', id: task.id };
   }
 
   status(chatId: number): { running: boolean; pending: number; plan: boolean } {
@@ -523,6 +573,21 @@ export class TaskQueue {
     });
     this.streams.set(chatId, stream);
     this.store.setTaskStatus(taskId, 'running');
+    // W4 (M2/M3): the run context is the TASK ROW, not the live session — §4.2
+    // stores `model`/`project` "на момент запуска", and that is exactly what a
+    // confirmed confirmation card (M2) and a retry/continue (M3) must honour
+    // after `PUT /api/settings` moved the session on. The row ALWAYS wins,
+    // including `''` — `''` is a real value ("the sandbox", or "no model"), and
+    // collapsing it to "ask the session" is precisely the drift M2 reported
+    // (card said model:"" → the task ran "drifted-model"). Only `NULL` (a row
+    // whose column was never written) falls back to the session.
+    // Known one-way trade-off: `ALTER TABLE … DEFAULT ''` gave every PRE-W2 row
+    // `project=''`, so a task that was still pending at the W2 migration runs in
+    // the per-chat sandbox instead of the session project. Deliberate: the W2
+    // migration is merged and its one-time window has passed, and correctness of
+    // the confirmed-card contract is worth more than that row's old intent.
+    const s0 = getOrCreate(this.store, this.cfg, chatId);
+    const runProject = task0?.project ?? s0.project;
     // W3 BEFORE snapshot (right after `running`, before the agent touches
     // anything). `resolveWorkdir` mkdirs first so the sandbox/inbox creation
     // itself never shows up as a task change. Never throws: any failure
@@ -530,8 +595,7 @@ export class TaskQueue {
     let snapBefore: GitSnapshot | null = null;
     let snapWorkdir = '';
     try {
-      const sx = getOrCreate(this.store, this.cfg, chatId);
-      snapWorkdir = resolveWorkdir(this.cfg, chatId, sx.project);
+      snapWorkdir = resolveWorkdir(this.cfg, chatId, runProject);
       // N1: the sig loop over a pathological dirty tree is bounded too —
       // missing sigs degrade to conservative keep.
       snapBefore = snapshotGit(snapWorkdir, Date.now() + DIFF_BUDGET_MS);
@@ -579,7 +643,8 @@ export class TaskQueue {
       const s = getOrCreate(this.store, this.cfg, chatId);
       const task = this.store.getTask(taskId);
       if (!task) throw new Error('E_NO_TASK');
-      const workdir = resolveWorkdir(this.cfg, chatId, s.project);
+      const workdir = resolveWorkdir(this.cfg, chatId, task.project ?? s.project);
+      const model = task.model ?? s.model;
       const history: HistoryItem[] = this.store
         .recentMessages(chatId, this.cfg.historyLimit)
         .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -596,7 +661,7 @@ export class TaskQueue {
         sessionId,
         agent: task.agent as AgentId,
         mode: task.mode as TaskMode,
-        model: s.model,
+        model,
         // WAVE2/EXEC (plan turn): the stored prompt is the real one; the plan
         // instruction wraps it here so approve can run the original as-is.
         prompt: prependSkillBodies(workdir, basePrompt, parseSkillNames(task.skills_used)),

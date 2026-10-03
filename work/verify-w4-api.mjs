@@ -20,10 +20,17 @@ const { createMiniServer } = await import('../dist/miniapp/http.js');
 const { Store } = await import('../dist/storage/db.js');
 const { TaskQueue } = await import('../dist/core/queue.js');
 const { register } = await import('../dist/gateway/registry.js');
+// The durable approval path production uses: `createResponder`'s `askApproval`
+// delegates to `approvals.requestApproval` (src/core/router.ts:681), which writes
+// the row AND parks a live waiter. The fake Responder must do the same, or the
+// `approval` branch of `cancel` is unreachable (no waiter ⇒ 'orphan').
+const { requestApproval } = await import('../dist/core/approvals.js');
 
 const TOKEN = 'test';
 const CHAT = 111;
 const FOREIGN = 999;
+/** Second WHITELISTED chat — proves chat scoping (M4) over real HTTP. */
+const OTHER = 222;
 
 let passed = 0;
 const failures = [];
@@ -78,7 +85,7 @@ writeFileSync(heartbeatPath, `${Date.now()}\n`);
 
 const cfg = {
   botToken: TOKEN,
-  allowedChatIds: [CHAT],
+  allowedChatIds: [CHAT, OTHER],
   defaultAgent: 'mock',
   defaultModel: '',
   taskTimeoutMs: 60000,
@@ -106,11 +113,21 @@ const store = new Store(dbPath);
 const seenPrompts = [];
 const gates = new Map();
 const cancelled = new Set();
+/** Command the next gated run must ask the shell to approve (real producer
+ *  path for approvals: `AgentTask.requestApproval` → durable row + live waiter). */
+let nextApprovalCmd = null;
 class GateProvider {
   id = 'mock';
   async run(task, onEvent) {
     await new Promise((res) => gates.set(task.sessionId, { task, res }));
     seenPrompts.push(task.prompt);
+    if (nextApprovalCmd !== null) {
+      const cmd = nextApprovalCmd;
+      nextApprovalCmd = null;
+      const ok = await task.requestApproval(cmd);
+      onEvent({ type: 'text', delta: `approval:${ok}\n` });
+      return { text: 'approval-output', exitCode: 0, sessionId: '', costUsd: 0.25 };
+    }
     onEvent({ type: 'text', delta: 'gate-output\n' });
     if (cancelled.has(task.sessionId)) {
       cancelled.delete(task.sessionId);
@@ -143,8 +160,9 @@ const io = {
   async streamStart() {
     return { push() {}, async finish() {}, async fail() {} };
   },
-  async askApproval() {
-    return false;
+  /** Production path: durable row + live waiter (router.ts:676-688). */
+  askApproval(chatId, command) {
+    return requestApproval(chatId, command);
   },
   async notify() {},
 };
@@ -153,7 +171,7 @@ const queue = new TaskQueue(store, cfg, io);
 const logs = [];
 const server = createMiniServer({
   botToken: TOKEN,
-  allowedChatIds: [CHAT],
+  allowedChatIds: [CHAT, OTHER],
   webDir: join(tmp, 'web'),
   log: (l) => logs.push(l),
   api: { cfg, store, queue, startTimeMs: Date.now() - 5000, heartbeatPath },
@@ -165,6 +183,7 @@ function headersFor(auth) {
   if (auth === 'none') return {};
   if (auth === 'bad') return { 'X-Telegram-Init-Data': initData({ userId: CHAT, hashOverride: '0'.repeat(64) }) };
   if (auth === 'foreign') return { 'X-Telegram-Init-Data': initData({ userId: FOREIGN }) };
+  if (auth === 'other') return { 'X-Telegram-Init-Data': initData({ userId: OTHER }) };
   if (auth === 'stale')
     return { 'X-Telegram-Init-Data': initData({ userId: CHAT, authDate: Math.floor(Date.now() / 1000) - STALE_S }) };
   return { 'X-Telegram-Init-Data': V() };
@@ -191,6 +210,48 @@ async function api(method, path, { auth = 'valid', body, rawBody } = {}) {
 }
 const jget = (path, auth) => api('GET', path, { auth });
 const jpost = (path, body, auth) => api('POST', path, { auth, body });
+
+/** Release every gate once and give the pump a tick. */
+async function releaseGates() {
+  for (const [, gt] of [...gates]) gt.res();
+  await sleep(120);
+}
+
+/** Wait until the chat is fully idle (no running task, nothing pending). */
+async function drain(max = 40) {
+  for (let i = 0; i < max; i += 1) {
+    const cur = await jget('/api/tasks/current');
+    if (cur.json?.running === null && (cur.json?.pending_n ?? 0) === 0) return;
+    await releaseGates();
+  }
+}
+
+/**
+ * Poll `GET /api/plan/current` until a plan is parked (optionally with an exact
+ * rework count), releasing gates so the plan TURN can actually finish. The plan
+ * lifecycle is produced exclusively through HTTP — no `store.createTask` /
+ * `setTaskPlanMeta` fabrication anywhere in this harness.
+ */
+async function waitForPlan(reworks = null) {
+  for (let i = 0; i < 40; i += 1) {
+    const r = await jget('/api/plan/current');
+    if (r.json?.plan && (reworks === null || r.json.reworks === reworks)) return r.json;
+    await releaseGates();
+  }
+  return null;
+}
+
+/** Submit a task that asks the shell for approval, and wait for the row. */
+async function startApprovalTask(command) {
+  nextApprovalCmd = command;
+  const t = await jpost('/api/tasks', { prompt: `needs approval: ${command}` });
+  for (let i = 0; i < 40; i += 1) {
+    const p = await jget('/api/approvals/pending');
+    if (p.json?.approval) return { taskId: t.json?.task_id, approval: p.json.approval };
+    await releaseGates();
+  }
+  return { taskId: t.json?.task_id, approval: null };
+}
 
 g('setup: ephemeral listener');
 assert(Number.isInteger(port) && port > 0, `listen(0) returned a real port (${port})`);
@@ -360,42 +421,96 @@ g('AC4: retry new id same prompt; continue new id new prompt same project');
   assert(typeof lt.json?.title === 'string' && lt.json.title.length <= 60, `title <= 60 chars (got ${lt.json?.title?.length})`);
 }
 
-/* ---------------- AC5: plan approve / rework x2 / rounds out ---------------- */
-function parkPlan(prompt, plan, reworks) {
-  const tid = store.createTask(CHAT, 'mock', 'code', prompt, [], '');
-  store.setTaskPlan(tid, plan);
-  store.setTaskPlanMeta(tid, prompt, reworks);
-  store.setTaskStatus(tid, 'awaiting_plan');
-  return tid;
-}
-g('AC5: approve -> started|queued; rework x2; third -> 410 E_ROUNDS_OUT + started');
+/* ---------------- AC5: the plan lifecycle, produced through the API ----------------
+ * The reviewer proved the old `parkPlan()` fixture (store.createTask +
+ * setTaskPlanMeta + setTaskStatus) LAUNDERED the unreachable-plan bug: it made
+ * the rework arithmetic pass while nothing could ever park a plan from the API.
+ * Every step below is a real HTTP call; the plan text is produced by the runner.
+ */
+g('AC5: plan lifecycle reachable from the API (no store fixture)');
 {
-  const a0 = await jpost('/api/plan/999999/approve', {});
-  assert(a0.status === 404 && a0.json?.error === 'E_NO_PLAN', 'approve unknown plan -> 404 E_NO_PLAN');
+  const alt = await jpost('/api/tasks', { prompt: 'x', plan: true });
+  assert(alt.status === 400 && alt.json?.error === 'E_BAD_ARG', 'non-canonical {plan:true} -> 400 E_BAD_ARG');
+  assert(
+    typeof alt.json?.detail === 'string' && alt.json.detail.includes('mode:"plan"'),
+    'the 400 names the canonical form instead of ignoring the flag',
+  );
+  const altDraft = await jpost('/api/drafts', { prompt: 'x', plan: true });
+  assert(altDraft.status === 400, 'drafts reject {plan:true} too');
+  const unk = await jpost('/api/tasks', { prompt: 'x', unknown_field: 1 });
+  assert(unk.status === 400 && unk.json?.error === 'E_BAD_ARG', 'unknown body key -> 400 E_BAD_ARG');
+  const badMode = await jpost('/api/tasks', { prompt: 'x', mode: 'askk' });
+  assert(badMode.status === 400, 'unknown mode -> 400');
 
-  const p1 = parkPlan('origin-one', 'plan body one', 0);
-  const wrong = await jpost('/api/plan/999999/approve', {});
-  assert(wrong.status === 404, 'approve mismatched id while plan parked -> 404');
-  const a1 = await jpost(`/api/plan/${p1}/approve`, {});
-  assert(a1.status === 200 && ['started', 'queued'].includes(a1.json?.state), `approve -> started|queued (got ${a1.json?.state})`);
-  assert(a1.json?.task_id === p1, 'approve returns the parked task id');
+  // 1. produce a plan through the API and read it back.
+  const sub = await jpost('/api/tasks', { prompt: 'ship the plan', mode: 'plan' });
+  assert(sub.status === 200 && sub.json?.state === 'planned', `mode:"plan" -> state planned (got ${sub.json?.state})`);
+  const plan = await waitForPlan(0);
+  assert(plan !== null && typeof plan.plan === 'string' && plan.plan.length > 0, 'GET /api/plan/current returns the API-created plan');
+  assert(plan?.task_id === sub.json?.task_id, 'plan/current task_id is the submitted task');
+  const cur = await jget('/api/tasks/current');
+  assert(cur.json?.plan?.task_id === sub.json?.task_id && cur.json.plan.reworks === 0, 'current surfaces the parked plan with 0 reworks');
+  const mismatch = await jpost('/api/plan/999999/approve', {});
+  assert(mismatch.status === 404 && mismatch.json?.error === 'E_NO_PLAN', 'approve a mismatched id while parked -> 404 E_NO_PLAN');
 
-  const p2 = parkPlan('origin-two', 'plan body two', 0);
-  const r1 = await jpost(`/api/plan/${p2}/rework`, { comment: 'please adjust' });
+  // 2. approve runs the task.
+  const ap = await jpost(`/api/plan/${plan.task_id}/approve`, {});
+  assert(ap.status === 200 && ['started', 'queued'].includes(ap.json?.state), `approve -> started|queued (got ${ap.json?.state})`);
+  assert(ap.json?.task_id === plan.task_id, 'approve returns the parked task id');
+  const approved = await jget(`/api/tasks/${plan.task_id}`);
+  assert(approved.json?.status !== 'awaiting_plan', 'approved task left awaiting_plan');
+  await drain();
+
+  // 3. rework to the end of the rounds budget.
+  const sub2 = await jpost('/api/tasks', { prompt: 'rework path', mode: 'plan' });
+  const p0 = await waitForPlan(0);
+  assert(p0?.task_id === sub2.json?.task_id, 'second plan parked from the API');
+  const r1 = await jpost(`/api/plan/${p0.task_id}/rework`, { comment: 'more detail' });
   assert(r1.status === 200 && r1.json?.rounds === 1, `first rework -> {rounds:1} (got ${r1.json?.rounds})`);
-
-  const p3 = parkPlan('origin-three', 'plan body three', 1);
-  const r2 = await jpost(`/api/plan/${p3}/rework`, { comment: 'once more' });
+  const p1 = await waitForPlan(1);
+  const r2 = await jpost(`/api/plan/${p1.task_id}/rework`, { comment: 'and more' });
   assert(r2.status === 200 && r2.json?.rounds === 2, `second rework -> {rounds:2} (got ${r2.json?.rounds})`);
-
-  const p4 = parkPlan('origin-four', 'plan body four', 2);
-  const r3 = await jpost(`/api/plan/${p4}/rework`, { comment: 'third time' });
+  const p2 = await waitForPlan(2);
+  const r3 = await jpost(`/api/plan/${p2.task_id}/rework`, { comment: 'third time' });
   assert(r3.status === 410 && r3.json?.error === 'E_ROUNDS_OUT', 'third rework -> 410 E_ROUNDS_OUT');
-  const started = await jget(`/api/tasks/${r3.json?.task_id ?? p4}`);
+  const started = await jget(`/api/tasks/${r3.json?.task_id ?? p2.task_id}`);
   assert(['pending', 'running'].includes(started.json?.status), `rounds-out task started (got ${started.json?.status})`);
+  const cleared = await jget('/api/plan/current');
+  assert(cleared.json?.plan === null, 'plan/current empty after the rounds run out');
+  await drain();
 
-  const cur = await jget('/api/plan/current');
-  assert(cur.status === 200, 'plan/current after rounds-out -> 200');
+  // 4. the confirmation card honours its OWN stored plan flag (B1.4).
+  const d = await jpost('/api/drafts', { prompt: 'card plan', mode: 'plan' });
+  assert(d.json?.draft?.mode === 'plan', 'draft round-trips mode:"plan"');
+  const c = await jpost(`/api/drafts/${d.json.draft.id}/confirm`, {});
+  assert(c.status === 200 && c.json?.state === 'planned', `confirm of a plan draft -> planned (got ${c.json?.state})`);
+  const dp = await waitForPlan(0);
+  assert(dp !== null && dp.plan.length > 0, 'confirm produced a real parked plan');
+  const noComment = await jpost(`/api/plan/${dp.task_id}/rework`, {});
+  assert(noComment.status === 400, 'rework without a comment -> 400');
+  await jpost(`/api/plan/${dp.task_id}/approve`, {});
+  await drain();
+}
+
+/* ---------------- M1: stop names what it actually stopped ---------------- */
+g('M1: stop echoes the id of the resource it really stopped');
+{
+  const planSub = await jpost('/api/tasks', { prompt: 'park me', mode: 'plan' });
+  const parked = await waitForPlan(0);
+  // Address a DIFFERENT real task of the same chat: cancel priority picks the
+  // parked plan, so the response must name the plan's id, not the URL id.
+  const other = await jpost('/api/tasks', { prompt: 'some other task' });
+  const s = await jpost(`/api/tasks/${other.json.task_id}/stop`, {});
+  assert(s.json?.stopped === 'plan' && s.json?.task_id === parked.task_id, `stop -> {"stopped":"plan","task_id":<parked>} (got ${s.json?.stopped}/${s.json?.task_id})`);
+  assert(typeof other.json?.task_id === 'number' && s.json?.task_id !== other.json.task_id, 'the echoed id is NOT the addressed (URL) id');
+  await drain();
+
+  // Same for the approval branch, with an approval produced by the RUNNER.
+  const ap = await startApprovalTask('rm -rf /tmp/w4-stop');
+  assert(ap.approval !== null && ap.approval.command === 'rm -rf /tmp/w4-stop', 'approval row produced by the real runner path');
+  const s2 = await jpost(`/api/tasks/${ap.taskId}/stop`, {});
+  assert(s2.json?.stopped === 'approval' && s2.json?.task_id === ap.approval.id, `stop -> {"stopped":"approval","task_id":<row>} (got ${s2.json?.stopped}/${s2.json?.task_id})`);
+  await drain();
 }
 
 /* ---------------- AC6: approvals allow/deny ---------------- */
@@ -436,6 +551,118 @@ g('AC7: ?since_rev=<current> -> 304; after bump -> 200 with new rev');
   assert(s2.status === 200 && s2.json?.rev === rev + 1, `after bump -> 200 with rev ${rev + 1}`);
   const s3 = await api('GET', `/api/tasks/${draftTaskId}?since_rev=${rev + 1}`);
   assert(s3.status === 304, 'since_rev=new current -> 304 again');
+}
+
+/* ---------------- M2/M3: card snapshot + source-task context survive drift ------ */
+g('M2/M3: confirm/retry/continue run the CONTEXT THEY NAMED, not the session');
+{
+  // Two sibling projects inside the allowed root, so a project switch is real.
+  const projA = join(workRoot, 'projA');
+  const projB = join(workRoot, 'projB');
+  mkdirSync(projA, { recursive: true });
+  mkdirSync(projB, { recursive: true });
+
+  // --- M2: the card decides. Session is set BEFORE the card is drawn, drifted
+  // after, and the confirmed task must still carry the card's values.
+  await api('PUT', '/api/settings', { body: { project: projA, model: 'card-model' } });
+  const card = await jpost('/api/drafts', { prompt: 'card ctx', mode: 'code' });
+  assert(card.json?.draft?.model === 'card-model' && card.json?.draft?.project === projA, 'card snapshots agent/model/project');
+  // The retry/continue SOURCE task is created while the session is still projA.
+  const src = await jpost('/api/tasks', { prompt: 'source task', mode: 'code' });
+  assert(src.status === 200, 'source task created in projA');
+  await drain();
+  await api('PUT', '/api/settings', { body: { model: 'drifted-model', project: projB } });
+  const drift = await jget('/api/settings');
+  assert(drift.json?.model === 'drifted-model' && drift.json?.project === projB, 'session really drifted away from the card');
+  const confirmed = await jpost(`/api/drafts/${card.json.draft.id}/confirm`, {});
+  const ctask = await jget(`/api/tasks/${confirmed.json.task_id}`);
+  assert(ctask.json?.model === 'card-model', `confirmed task runs the CARD model (got ${ctask.json?.model})`);
+  assert(ctask.json?.project === projA, `confirmed task runs the CARD project (got ${ctask.json?.project})`);
+  const stillDrift = await jget('/api/settings');
+  assert(stillDrift.json?.model === 'drifted-model', 'confirm does not mutate the session behind the owner');
+  const srcRow = await jget(`/api/tasks/${src.json.task_id}`);
+  assert(srcRow.json?.project === projA, `the source task really ran in projA (got ${srcRow.json?.project})`);
+
+  // --- M3: retry / continue reproduce the SOURCE task's project.
+  const retry = await jpost(`/api/tasks/${src.json.task_id}/retry`, {});
+  const rtask = await jget(`/api/tasks/${retry.json.task_id}`);
+  assert(rtask.json?.id !== src.json?.task_id && rtask.json?.prompt === 'source task', 'retry -> new id, same prompt');
+  assert(rtask.json?.project === projA, `retry runs in the SOURCE project (got ${rtask.json?.project})`);
+  const cont = await jpost(`/api/tasks/${src.json.task_id}/continue`, { text: 'follow-up' });
+  const ctask2 = await jget(`/api/tasks/${cont.json.task_id}`);
+  assert(ctask2.json?.prompt === 'follow-up' && ctask2.json?.project === projA, `continue runs in the SOURCE project too (got ${ctask2.json?.project})`);
+  await api('PUT', '/api/settings', { body: { project: '' } });
+  await drain();
+}
+
+/* ---------------- M4: single-use under concurrency, chat scoping, real rev ------ */
+g('M4: concurrency races, cross-chat scoping, real rev in /current');
+{
+  // 1. six concurrent allows on ONE approval: exactly one winner.
+  const rid = store.createApproval(CHAT, 'race-allow');
+  const rs = await Promise.all(Array.from({ length: 6 }, () => jpost(`/api/approvals/${rid}/allow`, {})));
+  const wins = rs.filter((r) => r.status === 200).length;
+  const losses = rs.filter((r) => r.status === 410 && r.json?.error === 'E_RESOLVED').length;
+  assert(wins === 1 && losses === 5, `6 concurrent allow -> 1 winner + 5 E_RESOLVED (got ${wins}/${losses})`);
+  assert(store.getApproval(rid)?.status === 'allowed', "the single winner's own decision is what got written");
+
+  // 2. allow-vs-deny race: one 200, and the loser cannot flip it afterwards.
+  const mid = store.createApproval(CHAT, 'race-mixed');
+  const mixed = await Promise.all([jpost(`/api/approvals/${mid}/allow`, {}), jpost(`/api/approvals/${mid}/deny`, {})]);
+  const oneOk = mixed.filter((r) => r.status === 200).length;
+  const oneGone = mixed.filter((r) => r.status === 410 && r.json?.error === 'E_RESOLVED').length;
+  assert(oneOk === 1 && oneGone === 1, `allow-vs-deny race -> one 200, one E_RESOLVED (got ${oneOk}/${oneGone})`);
+  const decided = store.getApproval(mid)?.status;
+  assert(decided === 'allowed' || decided === 'denied', `the race decided exactly one outcome (${decided})`);
+  await jpost(`/api/approvals/${mid}/${decided === 'allowed' ? 'deny' : 'allow'}`, {});
+  assert(store.getApproval(mid)?.status === decided, 'the losing side cannot flip the decision afterwards');
+
+  // 3. confirm race on one draft: one 200, the rest E_RESOLVED.
+  const dr = await jpost('/api/drafts', { prompt: 'race draft' });
+  const rs2 = await Promise.all(Array.from({ length: 4 }, () => jpost(`/api/drafts/${dr.json.draft.id}/confirm`, {})));
+  const dw = rs2.filter((r) => r.status === 200).length;
+  const dl = rs2.filter((r) => r.status === 410 && r.json?.error === 'E_RESOLVED').length;
+  assert(dw === 1 && dl === 3, `4 concurrent confirm -> 1 winner + 3 E_RESOLVED (got ${dw}/${dl})`);
+  await drain();
+
+  // 4. cross-chat draft probe: chat OTHER may neither confirm nor discard it,
+  //    and the row must still be open for its owner.
+  const mine = await jpost('/api/drafts', { prompt: 'chat-private draft' });
+  const did2 = mine.json.draft.id;
+  const f1 = await api('POST', `/api/drafts/${did2}/confirm`, { auth: 'other', body: {} });
+  assert(f1.status === 404 && f1.json?.error === 'E_NO_DRAFT', 'foreign chat confirm -> 404 E_NO_DRAFT');
+  const f2 = await api('POST', `/api/drafts/${did2}/discard`, { auth: 'other', body: {} });
+  assert(f2.status === 404, 'foreign chat discard -> 404');
+  assert(store.getDraft(did2)?.status === 'open', 'the draft is still open after both foreign attempts');
+  const owner = await jpost(`/api/drafts/${did2}/confirm`, {});
+  assert(owner.status === 200 && typeof owner.json?.task_id === 'number', 'the owner can still confirm it (single-use not burned by a foreign chat)');
+  await drain();
+
+  // 5. /current reports the running task's REAL rev, not a literal.
+  await drain();
+  const probe = await jpost('/api/tasks', { prompt: 'rev probe' });
+  const det = await jget(`/api/tasks/${probe.json.task_id}`);
+  const cur = await jget('/api/tasks/current');
+  assert(cur.json?.running?.id === probe.json?.task_id, 'current.running is the running task');
+  assert(det.json?.rev > 0, `rev is a live counter, not a hardcoded 0 (got ${det.json?.rev})`);
+  assert(cur.json?.running?.rev === det.json?.rev, `current.running.rev === the row rev (${cur.json?.running?.rev} vs ${det.json?.rev})`);
+  store.bumpRev(probe.json.task_id);
+  const cur2 = await jget('/api/tasks/current');
+  assert(cur2.json?.running?.rev === det.json.rev + 1, 'a rev bump is visible in /current on the next poll');
+  await drain();
+}
+
+/* ---------------- m1: a pre-W3 row must not list as an empty title ------------- */
+g('m1: recent falls back to the same 60-char title as the detail view');
+{
+  // `createTask` alone leaves `title` NULL — exactly a row written before W3.
+  const legacy = store.createTask(CHAT, 'mock', 'ask', 'legacy prompt without a stored title', [], '');
+  const det = await jget(`/api/tasks/${legacy}`);
+  const rec = await jget('/api/tasks/recent?limit=100');
+  const row = rec.json?.tasks?.find((t) => t.id === legacy);
+  assert(typeof det.json?.title === 'string' && det.json.title !== '', 'detail view derives a title for a legacy row');
+  assert(row?.title === det.json?.title, `recent uses the SAME title (list ${JSON.stringify(row?.title)} vs detail ${JSON.stringify(det.json?.title)})`);
+  assert(row?.title.length <= 60, 'the fallback title stays within the 60-char contract');
 }
 
 /* ---------------- AC8: settings ---------------- */
@@ -480,12 +707,23 @@ g('AC9: path guard, binary preview, download headers');
   assert(list.status === 200 && list.json?.abs === chatDir, `listing abs is the full workdir path (got ${list.json?.abs})`);
   assert(list.json?.total >= 3 && list.json?.shown === list.json?.entries?.length, 'listing total/shown consistent');
   assert(list.json.entries.every((e) => typeof e.rel === 'string' && typeof e.isDir === 'boolean'), 'entries carry rel+isDir');
+  // m11: ONE convention, stated once — `abs` is the OS-native absolute path the
+  // guard proved (never rewritten), `rel` is always forward-slash.
+  assert(!list.json.entries.some((e) => e.rel.includes('\\')), 'every entries[].rel is forward-slash');
   const miss = await jget('/api/files?dir=no-such-dir');
   assert(miss.status === 404, 'listing missing dir -> 404');
+
+  // m6: outside a git repo the diff must SAY SO, not masquerade as a cap.
+  const nogit = await jget('/api/files/diff?path=hello.txt');
+  assert(
+    nogit.status === 200 && nogit.json?.no_git === true && nogit.json?.truncated === false,
+    `non-git project -> {no_git:true} instead of a fake "truncated" (got ${JSON.stringify(nogit.json)})`,
+  );
 
   const pv = await jget('/api/files/preview?path=hello.txt');
   assert(pv.status === 200 && pv.json?.text === 'hello miniapp\n' && pv.json?.truncated === false, 'text preview exact + truncated false');
   assert(pv.json?.abs === join(chatDir, 'hello.txt'), 'preview abs is a full path');
+  assert(pv.json?.abs.startsWith(list.json.abs), 'm11: preview abs and listing abs come from the same resolver string');
   const big = await jget('/api/files/preview?path=big.txt');
   assert(big.status === 200 && big.json?.truncated === true && big.json?.text?.length === 64 * 1024, 'preview capped at 64 КБ with truncated flag');
   const bin = await jget('/api/files/preview?path=bin.dat');
@@ -527,6 +765,7 @@ g('AC9: path guard, binary preview, download headers');
   if (gitOk) {
     const gd = await jget('/api/files/diff?path=tracked.txt');
     assert(gd.status === 200 && typeof gd.json?.diff === 'string' && gd.json.diff.includes('+v2'), 'files/diff shows the live-tree change');
+    assert(gd.json?.no_git === false && gd.json?.truncated === false, 'in-repo diff reports no_git:false + truncated:false');
     const gb = await jget('/api/files/diff?path=bin.dat');
     assert(gb.status === 200 && gb.json?.binary === true, 'files/diff on binary -> {"binary":true}');
   } else {
@@ -569,15 +808,32 @@ g('task files/diff endpoints + plan_diff_before invisibility');
 }
 
 /* ---------------- skills list/pin + prepend path ---------------- */
-g('skills: list, pins, auto, SKILL.md prepend');
+g('skills: list, pins, auto, SKILL.md prepend, project-vs-global source');
 {
   const skillDir = join(chatDir, '.opencode', 'skills', 'demo-skill');
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill for W4.\n---\n\n# Demo\nDo the thing.\n');
+  // m12: a fake HOME (never the real one) so the `global` label is provable
+  // offline and without writing into the owner's home directory.
+  const fakeHome = join(tmp, 'home');
+  const globalDir = join(fakeHome, '.opencode', 'skills', 'global-fixture');
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, 'SKILL.md'), '---\nname: global-fixture\ndescription: Global scope fixture.\n---\n\n# G\n');
+  const realHome = { home: process.env.HOME, profile: process.env.USERPROFILE };
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
+
   const s1 = await jget('/api/skills');
   const found = (s1.json?.skills ?? []).find((s) => s.name === 'demo-skill');
   assert(s1.status === 200 && found?.description === 'Demo skill for W4.' && found?.pinned === false, 'skill discovered with description, unpinned');
-  assert(found?.source === 'project', 'skill source project');
+  assert(found?.source === 'project', 'a workdir skill is source "project"');
+  const gfound = (s1.json?.skills ?? []).find((s) => s.name === 'global-fixture');
+  assert(gfound !== undefined && gfound.source === 'global', `a home-level skill is source "global", not "project" (got ${gfound?.source})`);
+  assert(
+    new Set((s1.json?.skills ?? []).map((s) => s.source)).size <= 2 &&
+      (s1.json?.skills ?? []).every((s) => s.source === 'project' || s.source === 'global'),
+    'every skill source is one of the two contracted values (project|global)',
+  );
 
   const put = await api('PUT', '/api/skills', { body: { pins: ['demo-skill'], auto: true } });
   assert(put.status === 200 && put.json?.ok === true, 'PUT skills -> {ok:true}');
@@ -600,6 +856,10 @@ g('skills: list, pins, auto, SKILL.md prepend');
     await sleep(150);
   }
   assert(seenPrompts.some((p) => p.includes('# Skill: demo-skill') && p.includes('use the skill')), 'provider prompt carries the prepended SKILL.md body');
+  if (realHome.home === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome.home;
+  if (realHome.profile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = realHome.profile;
 }
 
 /* ---------------- transport: methods, bodies, misc ---------------- */
@@ -639,6 +899,15 @@ g('transport: 405/400/413/404 + source invariants');
   else process.stdout.write('  SKIP types.ts diff check (git unavailable)\n');
   const cfgSrc = readFileSync(join(ROOT, 'src', 'config.ts'), 'utf8');
   assert(cfgSrc.includes('opencode'), 'config.ts present (agent check via AGENT_IDS unchanged)');
+  // The live bot must actually HAND the API its environment: without `api:` in
+  // src/index.ts every /api/* path 404s behind a perfectly working guard, and
+  // no harness (which builds its own deps) could ever notice.
+  const idxSrc = readFileSync(join(ROOT, 'src', 'index.ts'), 'utf8');
+  assert(
+    /createMiniServer\(\{[\s\S]{0,800}?\bapi:\s*\{/.test(idxSrc),
+    'src/index.ts wires the live api env into createMiniServer (no dead /api surface)',
+  );
+  assert(idxSrc.includes('queue: deps.queue') && idxSrc.includes('heartbeatPath:'), 'the wired env carries the TaskQueue + heartbeat path');
 }
 
 /* ---------------- AC10: load ---------------- */

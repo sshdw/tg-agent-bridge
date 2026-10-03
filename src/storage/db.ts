@@ -100,6 +100,9 @@ export interface DraftRow {
   project: string;
   /** JSON array of pinned skill names. */
   skills: string;
+  /** W4: 1 when the draft was created with the canonical `mode:'plan'` form —
+   *  the durable flag `confirm` reads (the API cannot trust the live session). */
+  plan: number;
   status: string;
   created_at: number;
 }
@@ -262,6 +265,14 @@ export class Store {
     this.addColumn('task_files', 'binary', 'INTEGER NOT NULL DEFAULT 0');
     // v0.5 W3r2: park-time BEFORE snapshot for the approved re-run (R2-MAJOR).
     this.addColumn('tasks', 'plan_diff_before', 'TEXT');
+    // v0.5 W4: plan-mode flag on the confirmation card. §5.1 item 6/7 —
+    // `confirm` must run the plan turn the CARD showed, not whatever the
+    // session drifted to meanwhile. Forward-only, default 0 for every row
+    // written before this migration. Position: with the other addColumn calls,
+    // i.e. BEFORE any index statement below (`idx_drafts_chat` above only
+    // references chat_id/status/id, which the CREATE TABLE already made, so
+    // the new column needs no index rebuild — §4.2 ordering rule respected).
+    this.addColumn('drafts', 'plan', 'INTEGER NOT NULL DEFAULT 0');
     // After every column exists (fresh and legacy DBs alike).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_rev ON tasks (id, rev)');
   }
@@ -529,6 +540,15 @@ export class Store {
   // porcelain snapshots are not part of the contract). Existing `SELECT *`
   // readers above are untouched (chat paths + harnesses depend on them).
 
+  /**
+   * Live journal mode (`wal`/`delete`/…) — `GET /api/health` must report the
+   * REAL db state (m9), not a hardcoded literal. Read-only pragma probe.
+   */
+  journalMode(): string {
+    const v = this.db.pragma('journal_mode', { simple: true }) as unknown;
+    return typeof v === 'string' ? v : 'unknown';
+  }
+
   /** Columns the Mini App contract may see (everything except the internals). */
   private static apiTaskCols(): string {
     return [
@@ -572,9 +592,14 @@ export class Store {
     TaskRow,
     'id' | 'title' | 'agent' | 'model' | 'project' | 'mode' | 'status' | 'cost_usd' | 'created_at' | 'finished_at'
   >[] {
+    // `COALESCE(NULLIF(title,''), substr(prompt,1,60))` (m1): a row written
+    // before W3 has `title IS NULL`, and the list used to show `""` where the
+    // detail view showed a real title. The fallback is computed in SQL, so
+    // `prompt` itself never leaves the database (an 8 KB column × 100 rows).
     return this.db
       .prepare(
-        `SELECT id, title, agent, model, project, mode, status, cost_usd, created_at, finished_at
+        `SELECT id, COALESCE(NULLIF(title, ''), substr(prompt, 1, 60)) AS title,
+                agent, model, project, mode, status, cost_usd, created_at, finished_at
          FROM tasks WHERE chat_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
       )
       .all(chatId, limit, offset) as Pick<
@@ -749,13 +774,14 @@ export class Store {
     model = '',
     project = '',
     skills: string[] = [],
+    plan = false,
   ): number {
     const r = this.db
       .prepare(
-        `INSERT INTO drafts (chat_id, prompt, mode, agent, model, project, skills, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+        `INSERT INTO drafts (chat_id, prompt, mode, agent, model, project, skills, plan, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
       )
-      .run(chatId, prompt, mode, agent, model, project, JSON.stringify(skills), nowSec());
+      .run(chatId, prompt, mode, agent, model, project, JSON.stringify(skills), plan ? 1 : 0, nowSec());
     return Number(r.lastInsertRowid);
   }
 

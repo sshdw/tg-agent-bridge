@@ -542,8 +542,8 @@ export function registerRouter(bot: Bot, deps: Deps): void {
   bot.command('cancel', async (ctx) => {
     const chatId = ctx.chat.id;
     const r = await deps.queue.cancel(chatId);
-    if (r === 'approval') return deps.io.notify(chatId, 'Отклонено.');
-    if (r === 'task') return; // fail() already messaged
+    if (r.kind === 'approval') return deps.io.notify(chatId, 'Отклонено.');
+    if (r.kind === 'task') return; // fail() already messaged
     return deps.io.notify(chatId, 'Нечего отменять.');
   });
 
