@@ -4,7 +4,6 @@ dist/
 work/*
 !work/verify-w*.mjs
 data/
-*.db
 *.db-journal
 *.db-wal
 *.db-shm
