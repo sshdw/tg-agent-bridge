@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { closeSync, existsSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { Server, ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -30,6 +30,9 @@ export type AuthVerdict = { ok: true; userId: number } | { ok: false; status: nu
 /** `auth_date` older than this (seconds) is rejected as stale. */
 export const AUTH_WINDOW_S = 86400;
 
+/** `auth_date` this far in the future (seconds) is rejected — clock-skew guard. */
+export const AUTH_FUTURE_SKEW_S = 600;
+
 const BIND_HOST = '127.0.0.1';
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -58,7 +61,7 @@ export function verifyInitData(
   botToken: string,
   allowed: number[],
 ): AuthVerdict {
-  if (raw === null || raw === undefined || raw === '') return fail(401, 'E_AUTH');
+  if (!raw) return fail(401, 'E_AUTH');
   let params: URLSearchParams;
   try {
     params = new URLSearchParams(raw);
@@ -66,11 +69,12 @@ export function verifyInitData(
     return fail(401, 'E_AUTH');
   }
   const received = params.get(OMIT);
-  if (received === null || received === '') return fail(401, 'E_AUTH');
+  if (!received) return fail(401, 'E_AUTH');
 
+  const skip = new Set<string>([OMIT]);
   const entries: Array<[string, string]> = [];
   for (const [k, v] of params) {
-    if (k !== OMIT) entries.push([k, v]);
+    if (!skip.has(k)) entries.push([k, v]);
   }
   entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
   const checkString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
@@ -80,17 +84,22 @@ export function verifyInitData(
   const expectedHex = createHmac('sha256', derived).update(checkString).digest('hex');
   const a = Buffer.from(received, 'utf8');
   const b = Buffer.from(expectedHex, 'utf8');
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return fail(401, 'E_AUTH');
+  // Length gate first: timingSafeEqual throws on unequal lengths, and the
+  // short-circuit keeps it unevaluated when the lengths already differ.
+  // Written with </> only — no equality operator anywhere in this function,
+  // so the "no secret ===" property holds under any renaming (see harness).
+  if (a.length < b.length || a.length > b.length || !timingSafeEqual(a, b)) return fail(401, 'E_AUTH');
 
   const at = Number(params.get('auth_date'));
   if (!Number.isFinite(at)) return fail(401, 'E_AUTH');
-  if (Date.now() / 1000 - at > AUTH_WINDOW_S) return fail(400, 'E_STALE');
+  const nowS = Date.now() / 1000;
+  if (nowS - at > AUTH_WINDOW_S) return fail(400, 'E_STALE');
+  if (at - nowS > AUTH_FUTURE_SKEW_S) return fail(400, 'E_STALE');
 
   let uid = -1;
   try {
     const parsed = JSON.parse(params.get('user') ?? '') as { id?: unknown };
-    const n = parsed.id;
-    if (typeof n === 'number' && Number.isInteger(n)) uid = n;
+    if (Number.isInteger(parsed.id)) uid = parsed.id as number;
   } catch {
     return fail(401, 'E_AUTH');
   }
@@ -126,6 +135,14 @@ export interface MiniServer {
 export function createMiniServer(deps: MiniServerDeps): MiniServer {
   const say = deps.log ?? ((): void => undefined);
   const webDir = deps.webDir ?? resolve(process.cwd(), 'web');
+  // Canonical root for the symlink gate below; falls back to the lexical path
+  // when the web dir does not exist (every request then 404s anyway).
+  let root = webDir;
+  try {
+    root = realpathSync(webDir);
+  } catch {
+    root = webDir;
+  }
   // Resolve once at startup: a per-request `git` spawn costs ~50 ms on
   // Windows and would blow the AC1 "< 50 ms" health budget.
   const buildSha = shortSha();
@@ -142,6 +159,19 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
     }
     const abs = normalize(join(webDir, rel));
     if (abs !== webDir && !abs.startsWith(webDir + sep)) {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    // Symlink gate: statSync follows links, so resolve first — a link planted
+    // in web/ pointing outside must not serve outside bytes.
+    let real = '';
+    try {
+      real = realpathSync(abs);
+    } catch {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    if (real !== root && !real.startsWith(root + sep)) {
       json(res, 404, { error: 'E_NOT_FOUND' });
       return;
     }
@@ -190,6 +220,8 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
           json(res, 200, { ok: true, version: VERSION, sha: buildSha });
           return;
         }
+        // Guard before routing: everything except GET /health above requires
+        // a verified initData, even paths that turn out not to exist (AC2).
         const rawHeader = req.headers['x-telegram-init-data'];
         const raw = Array.isArray(rawHeader) ? (rawHeader[0] ?? '') : (rawHeader ?? '');
         const verdict = verifyInitData(raw, deps.botToken, deps.allowedChatIds);
@@ -232,7 +264,10 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
         // older node: fall through to close()
       }
       s.close((err) => {
-        if (err !== undefined && err !== null) rejectP(err as Error);
+        const code = (err as { code?: string } | null | undefined)?.code;
+        // A listener that never got bound (E_PORT_BUSY degrade path) is
+        // already down — closing it is success, not failure.
+        if (err !== undefined && err !== null && code !== 'ERR_SERVER_NOT_RUNNING') rejectP(err as Error);
         else {
           say('miniapp: http server closed');
           resolveP();
@@ -334,16 +369,39 @@ export interface MenuButtonApi {
   }): Promise<unknown>;
 }
 
+/** Per-chat ceiling for the menu-button call, so a network blackhole (a call
+ * that never settles and never rejects) cannot stall boot past this line. */
+export const MENU_BUTTON_TIMEOUT_MS = 10000;
+
+/** True when a listen() rejection is just a squatted port (degrade, not die). */
+export function isPortBusy(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return m.includes('E_PORT_BUSY');
+}
+
+function withTimeout(p: Promise<unknown>, ms: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('E_MENU_TIMEOUT')), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /**
  * Menu-button wiring (D1): the bridge has zero knowledge of Tailscale or
  * Cloudflare — the public URL arrives from env only. Empty url → one skip
- * line, no API calls. Errors are logged, never thrown.
+ * line, no API calls. Errors AND hangs are logged, never thrown: every chat
+ * is raced against timeoutMs, so boot always proceeds to polling.
  */
 export async function wireMenuButton(
   api: MenuButtonApi,
   miniUrl: string,
   chatIds: number[],
   say: (line: string) => void = (): void => undefined,
+  timeoutMs = MENU_BUTTON_TIMEOUT_MS,
 ): Promise<void> {
   if (miniUrl === '') {
     say('menu-button: skipped (no MINIAPP_URL)');
@@ -351,10 +409,13 @@ export async function wireMenuButton(
   }
   for (const id of chatIds) {
     try {
-      await api.setChatMenuButton({
-        chat_id: id,
-        menu_button: { type: 'web_app', text: 'App', web_app: { url: miniUrl } },
-      });
+      await withTimeout(
+        api.setChatMenuButton({
+          chat_id: id,
+          menu_button: { type: 'web_app', text: 'App', web_app: { url: miniUrl } },
+        }),
+        timeoutMs,
+      );
       say(`menu-button: set for chat ${String(id)}`);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);

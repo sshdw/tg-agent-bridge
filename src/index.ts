@@ -19,7 +19,7 @@ import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 import { probeRichSupport } from './telegram/rich.js';
 import { startCiPoller } from './github/ciPoller.js';
-import { acquirePidLock, createMiniServer, releasePidLock, startHeartbeat, wireMenuButton } from './miniapp/http.js';
+import { acquirePidLock, createMiniServer, isPortBusy, releasePidLock, startHeartbeat, wireMenuButton } from './miniapp/http.js';
 import { log } from './log.js';
 import { VERSION } from './version.js';
 
@@ -115,21 +115,29 @@ async function main(): Promise<void> {
   startCiPoller(cfg, store, deps.io);
 
   // Mini App HTTP layer (W1): heartbeat so the client can show
-  // "бот недоступен" when this process dies, menu-button wiring (D1),
-  // then the node:http listener on loopback only.
+  // "бот недоступен" when this process dies, menu-button wiring (D1, bounded
+  // by its own timeout — a Telegram blackhole cannot stall boot), then the
+  // node:http listener on loopback only.
   const stopHeartbeat = startHeartbeat(join(dataDir, 'heartbeat'), 30000, log);
   await wireMenuButton(bot.api, cfg.miniUrl, cfg.allowedChatIds, log);
   const mini = createMiniServer({ botToken: cfg.botToken, allowedChatIds: cfg.allowedChatIds, log });
   try {
     await mini.listen(cfg.miniPort);
   } catch (err) {
-    const m = err instanceof Error ? err.message : String(err);
-    if (!m.includes('E_PORT_BUSY')) log(`miniapp: failed to start: ${m.slice(0, 200)}`);
-    stopHeartbeat();
-    releasePidLock(lockPath);
-    store.close();
-    process.exit(1);
-    return;
+    if (isPortBusy(err)) {
+      // Degraded, not dead: chat is the primary channel, the Mini App is
+      // auxiliary — a squatted port costs the listener, never polling.
+      // Heartbeat and pid-lock stay: the process is alive and polling.
+      log('miniapp: degraded (E_PORT_BUSY) — polling continues without HTTP listener');
+    } else {
+      const m = err instanceof Error ? err.message : String(err);
+      log(`miniapp: failed to start: ${m.slice(0, 200)}`);
+      stopHeartbeat();
+      releasePidLock(lockPath);
+      store.close();
+      process.exit(1);
+      return;
+    }
   }
 
   const stop = (): void => {
