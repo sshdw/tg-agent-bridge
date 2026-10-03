@@ -4,6 +4,7 @@ import type { AgentEvent, AgentId, AgentTask, HistoryItem, TaskMode } from '../g
 import { composePrompt } from '../gateway/spawnRunner.js';
 import type { Store } from '../storage/db.js';
 import { collectTaskFiles, snapshotGit, summarizeFiles, taskTitle } from '../miniapp/diff.js';
+import { DIFF_BUDGET_MS } from '../miniapp/diff.js';
 import type { GitSnapshot } from '../miniapp/diff.js';
 import { AttachCensor, outboundErrorMessage, planAttachments } from './files.js';
 import { resolveWorkdir } from './permissions.js';
@@ -75,6 +76,16 @@ export class TaskQueue {
   private planOrigin = new Map<number, string>();
   /** Plan turn id -> rework rounds already spent. */
   private planRounds = new Map<number, number>();
+  /**
+   * Plan-turn BEFORE snapshots (B1): taskId -> workdir + snapshot taken when
+   * the plan turn ran. A parked plan's re-run must attribute against the
+   * PRE-plan-turn tree, not the post-plan-turn one — otherwise the B1 dirt
+   * filter would eat the plan turn's own file writes. Single-use: consumed
+   * by the next `execute` of the same taskId (workdir must still match), lost
+   * on restart (then the approved run degrades to a fresh snapshot — same as
+   * before this filter existed, never worse).
+   */
+  private planSnaps = new Map<number, { workdir: string; snap: GitSnapshot }>();
   /** Set by plan.ts: deliver the approve/rework keyboard after a plan turn. */
   private planNotify: ((chatId: number, taskId: number, plan: string) => Promise<void>) | null = null;
 
@@ -153,6 +164,8 @@ export class TaskQueue {
     const taskId = this.store.createTask(chatId, s.agent, mode, prompt, images, options.preset ?? '');
     // W3 launch metadata: the ONLY point where the pinned skills are known
     // (the pump later re-reads the row, the options do not survive to it).
+    // NOTE (m1): `skills_used` is PINNED INTENT at submit, not observed
+    // tool_use — W5/W7 must label it "pinned", never "used".
     try {
       this.store.setTaskLaunchMeta(
         taskId,
@@ -338,6 +351,15 @@ export class TaskQueue {
       snapBefore = null;
       snapWorkdir = '';
     }
+    // B1: an approved parked plan re-runs under the SAME taskId — attribute
+    // against the plan turn's BEFORE snapshot, not a fresh (post-plan-turn)
+    // one. Consumed single-use; workdir mismatch (project switched while
+    // parked) falls back to the fresh snapshot.
+    const carried = this.planSnaps.get(taskId);
+    this.planSnaps.delete(taskId);
+    if (carried !== undefined && carried.workdir === snapWorkdir) {
+      snapBefore = carried.snap;
+    }
     try {
       const s = getOrCreate(this.store, this.cfg, chatId);
       const task = this.store.getTask(taskId);
@@ -405,6 +427,10 @@ export class TaskQueue {
         this.store.addMessage(chatId, 'assistant', reply);
         this.store.setTaskStatus(taskId, 'awaiting_plan');
         this.parkPlan(chatId, taskId, reply, rounds, origin);
+        // B1: stash this turn's BEFORE snapshot for the approved re-run.
+        if (snapBefore !== null && snapWorkdir !== '') {
+          this.planSnaps.set(taskId, { workdir: snapWorkdir, snap: snapBefore });
+        }
         await stream.finish(reply);
         const notify = this.planNotify;
         if (notify) {
@@ -445,6 +471,7 @@ export class TaskQueue {
       this.planTurns.delete(taskId);
       this.planOrigin.delete(taskId);
       this.planRounds.delete(taskId);
+      this.planSnaps.delete(taskId);
       this.store.setTaskStatus(taskId, code === 'E_CANCELLED' ? 'cancelled' : 'error');
       // W3: a failed task may still have changed files — same finalize branch
       // (covers cancel-mid-run too: `cancel()` only flips the status, the
@@ -456,16 +483,18 @@ export class TaskQueue {
 
   /**
    * W3 AFTER snapshot + `task_files` rows + `git_*`/`files_summary` columns +
-   * `rev` bump. Never throws: any failure degrades to NULL columns / empty
-   * rows and the task status set beside it still lands. `workdir === ''`
-   * means even the BEFORE snapshot never resolved — nothing to collect.
-   * Plan-turn parks skip this (not terminal; the approved re-run finalizes).
+   * `rev` bump. Best-effort, never throws — but never silent either (m7):
+   * collection failures are logged. `workdir === ''` means even the BEFORE
+   * snapshot never resolved — nothing to collect. Whole collection runs under
+   * DIFF_BUDGET_MS (M6). Plan-turn parks skip this (not terminal; the
+   * approved re-run finalizes against the stashed BEFORE snapshot).
    */
   private finishTaskDiff(taskId: number, workdir: string, before: GitSnapshot | null): void {
     try {
       if (workdir === '') return;
-      const after = snapshotGit(workdir);
-      const files = collectTaskFiles(before, after, workdir);
+      const deadline = Date.now() + DIFF_BUDGET_MS;
+      const after = snapshotGit(workdir, deadline);
+      const files = collectTaskFiles(before, after, workdir, deadline);
       this.store.saveTaskFiles(taskId, files);
       this.store.setTaskGit(
         taskId,
@@ -474,8 +503,9 @@ export class TaskQueue {
         before?.sha ?? null,
         JSON.stringify(summarizeFiles(files)),
       );
-    } catch {
-      // diff collection must never fail the task itself
+    } catch (e) {
+      // Best-effort: the task status set beside this still lands.
+      log(`task-diff: collect failed for task ${taskId} (${e instanceof Error ? e.message : String(e)})`);
     }
   }
 }

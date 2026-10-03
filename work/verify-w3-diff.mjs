@@ -175,6 +175,8 @@ const drive = async (chatId, prompt, options = {}, timeoutMs = 60000) => {
   check('AC1: files_summary changed_n=2', summary.changed_n === 2, JSON.stringify(summary));
   check('AC1: skills_used pinned JSON', done.skills_used === '["gortex-debug"]', String(done.skills_used));
   check('AC1: model/project from session', done.model === 'm-verify' && done.project === repo, `${done.model}|${done.project}`);
+  check('AC1: git_before clean (BEFORE precedes writes)', done.git_before === '', JSON.stringify(done.git_before));
+  check('AC1: git_after shows the touched files', (done.git_after ?? '').includes('b.txt'), JSON.stringify(done.git_after));
 }
 
 // ---------------------------------------------------------------- AC2: unifiedDiff shape + 200-line cap
@@ -315,6 +317,177 @@ const drive = async (chatId, prompt, options = {}, timeoutMs = 60000) => {
   check('AC8: no lone surrogate at cut', !/[\ud800-\udbff]$/.test(fin.title ?? ''), JSON.stringify((fin.title ?? '').slice(-3)));
   check('AC8: rev bumped ≥ 3 over lifecycle', (fin.rev ?? 0) >= 3, String(fin.rev));
   check('AC8: taskTitle unit keeps pair', taskTitle(prompt) === expectedTitle);
+}
+
+// ---------------------------------------------------------------- B1a: pre-existing dirt is NOT the task's
+{
+  const repo = join(base, 'r-b1a');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  writeFileSync(join(repo, 'dirty.txt'), ' чужое\ndirt\n'); // dirt BEFORE the task
+  useProject(119, repo);
+  mockFn = async (task) => {
+    writeFileSync(join(task.workdir, 'other.txt'), 'o1\no2\no3\n');
+    return { text: 'only other', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  const done = await drive(119, 'B1a pre-existing dirt');
+  const files = store.taskFiles(done.id);
+  check('B1a: only the task-touched file stored', files.length === 1 && files[0].path === 'other.txt', JSON.stringify(files.map((f) => f.path)));
+  check('B1a: dirty.txt excluded', files.every((f) => f.path !== 'dirty.txt'));
+}
+
+// ---------------------------------------------------------------- B1b: plan-turn writes survive approve
+{
+  const repo = join(base, 'r-b1b');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  useProject(120, repo);
+  mockFn = async (task) => {
+    if (task.prompt.startsWith('Plan first')) {
+      writeFileSync(join(task.workdir, 'planmade.txt'), 'from plan turn\n');
+      return { text: 'the plan', exitCode: 0, sessionId: '', costUsd: null };
+    }
+    writeFileSync(join(task.workdir, 'impl.txt'), 'from impl run\n');
+    return { text: 'impl done', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  queue.submit(120, 'B1b plan flow', 'code', [], { planOnly: true });
+  nextIdHint += 1;
+  const parked = await waitFor(() => store.awaitingPlan(120), 30000, 'plan parks (b1b)');
+  check('B1b: plan parked', parked?.plan_text === 'the plan', String(parked?.plan_text));
+  const tid = queue.approvePlan(120);
+  check('B1b: approve returns same task', tid === parked?.id, String(tid));
+  const t0 = Date.now();
+  let fin;
+  for (;;) {
+    const c = tid != null ? store.getTask(tid) : undefined;
+    if (c && ['done', 'error', 'cancelled'].includes(c.status)) {
+      fin = c;
+      break;
+    }
+    if (Date.now() - t0 > 60000) throw new Error('timeout B1b impl run');
+    await tick(25);
+  }
+  const paths = store.taskFiles(fin.id).map((f) => f.path);
+  check('B1b: plan-turn file still attributed', paths.includes('planmade.txt'), JSON.stringify(paths));
+  check('B1b: impl-run file attributed', paths.includes('impl.txt'), JSON.stringify(paths));
+}
+
+// ---------------------------------------------------------------- B2: new file in a new subdir
+{
+  const repo = join(base, 'r-b2');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  useProject(121, repo);
+  mockFn = async (task) => {
+    mkdirSync(join(task.workdir, 'sub'), { recursive: true });
+    writeFileSync(join(task.workdir, 'sub', "q'q.txt"), 'quoted content\n');
+    return { text: 'subdir', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  const done = await drive(121, 'B2 new subdir file');
+  const files = store.taskFiles(done.id);
+  const hit = files.find((f) => f.path === "sub/q'q.txt");
+  check('B2: real relative path stored (no sub/ phantom)', hit !== undefined, JSON.stringify(files.map((f) => f.path)));
+  check('B2: diff non-empty with content', (hit?.diff ?? '').includes('quoted content'), String(hit?.diff)?.slice(0, 80));
+}
+
+// ---------------------------------------------------------------- M1: mid-run commit keeps changes visible
+{
+  const repo = join(base, 'r-m1');
+  initRepo(repo);
+  writeFileSync(join(repo, 'm.txt'), 'm0\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  const shaBefore = headOf(repo);
+  useProject(122, repo);
+  mockFn = async (task) => {
+    appendFileSync(join(task.workdir, 'm.txt'), 'midrun\n');
+    execFileSync('git', [...GIT_ENV, 'add', '-A'], { cwd: task.workdir, timeout: 30000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    execFileSync('git', [...GIT_ENV, 'commit', '-qm', 'mid'], { cwd: task.workdir, timeout: 30000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    return { text: 'committed mid-run', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  const done = await drive(122, 'M1 mid-run commit');
+  check('M1: HEAD moved during task', done.git_base_sha === shaBefore && headOf(repo) !== shaBefore, String(done.git_base_sha));
+  const files = store.taskFiles(done.id);
+  const m = files.find((f) => f.path === 'm.txt');
+  check('M1: committed change still recorded', m !== undefined && m.added === 1, JSON.stringify(m));
+}
+
+// ---------------------------------------------------------------- M2: staged rename keeps both sides
+{
+  const repo = join(base, 'r-m2');
+  initRepo(repo);
+  writeFileSync(join(repo, 'old.txt'), 'r1\nr2\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  sh(['mv', 'old.txt', 'new.txt'], repo);
+  appendFileSync(join(repo, 'new.txt'), 'r3\n');
+  const sha = headOf(repo);
+  const after = snapshotGit(repo);
+  const files = collectTaskFiles({ sha, porcelain: '', sigs: {} }, after, repo);
+  const paths = files.map((f) => f.path).sort();
+  const old = files.find((f) => f.path === 'old.txt');
+  const nw = files.find((f) => f.path === 'new.txt');
+  check('M2: both rename sides collected', JSON.stringify(paths) === '["new.txt","old.txt"]', JSON.stringify(paths));
+  check('M2: old side records removal, new side addition', (old?.removed ?? 0) === 2 && (nw?.added ?? 0) >= 1, JSON.stringify(files.map((f) => [f.path, f.added, f.removed])));
+}
+
+// ---------------------------------------------------------------- M3: Cyrillic filename verbatim
+{
+  const repo = join(base, 'r-m3');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  useProject(123, repo);
+  mockFn = async (task) => {
+    writeFileSync(join(task.workdir, 'uni-файл.txt'), 'кириллица-контент\n');
+    return { text: 'cyrillic', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  const done = await drive(123, 'M3 cyrillic name');
+  const files = store.taskFiles(done.id);
+  const hit = files.find((f) => f.path === 'uni-файл.txt');
+  check('M3: path stored verbatim (no octal escape)', hit !== undefined, JSON.stringify(files.map((f) => f.path)));
+  check('M3: diff non-empty', (hit?.diff ?? '').includes('кириллица-контент'), String(hit?.diff)?.slice(0, 80));
+}
+
+// ---------------------------------------------------------------- M4: NUL past the 8 KB probe
+{
+  const repo = join(base, 'r-m4');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  useProject(124, repo);
+  mockFn = async (task) => {
+    writeFileSync(join(task.workdir, 'late-nul.bin'), `${'A'.repeat(8500)}\0tail\n`);
+    return { text: 'late nul', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  const done = await drive(124, 'M4 late NUL byte');
+  const files = store.taskFiles(done.id);
+  const hit = files.find((f) => f.path === 'late-nul.bin');
+  check('M4: binary:true past probe window', hit?.binary === 1, JSON.stringify(hit));
+  check('M4: diff IS NULL (no raw leak)', hit?.diff === null, String(hit?.diff)?.slice(0, 40));
+}
+
+// ---------------------------------------------------------------- M6: overall budget trips on a past deadline
+{
+  const repo = join(base, 'r-m6');
+  initRepo(repo);
+  writeFileSync(join(repo, 'x.txt'), 'x\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  appendFileSync(join(repo, 'x.txt'), 'y\n');
+  writeFileSync(join(repo, 'z.txt'), 'z\n');
+  const sha = headOf(repo);
+  const after = snapshotGit(repo);
+  const files = collectTaskFiles({ sha, porcelain: '', sigs: {} }, after, repo, Date.now() - 1);
+  check('M6: expired budget marks all remaining truncated', files.length === 2 && files.every((f) => f.truncated === true && f.diff === null), JSON.stringify(files.map((f) => [f.path, f.truncated])));
 }
 
 // ------------------------------------------------- snapshot timing: 500-file repo

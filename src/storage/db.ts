@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { DIFF_MAX_LINES, TASK_FILES_MAX, enforceDiffCap, sanitizeDiffPath } from '../miniapp/diff.js';
 
 export interface SessionRow {
   chat_id: number;
@@ -250,6 +251,9 @@ export class Store {
     this.addColumn('tasks', 'git_after', 'TEXT');
     this.addColumn('tasks', 'git_base_sha', 'TEXT');
     this.addColumn('tasks', 'files_summary', 'TEXT');
+    // Forward-compat: a hypothetical pre-W3 `task_files` without `binary`
+    // (no real-world instance exists — production never had the table).
+    this.addColumn('task_files', 'binary', 'INTEGER NOT NULL DEFAULT 0');
     // After every column exists (fresh and legacy DBs alike).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_rev ON tasks (id, rev)');
   }
@@ -386,9 +390,12 @@ export class Store {
   }
 
   /**
-   * Replace the `task_files` rows of a task. Stores at most the first 50
-   * files (by the caller's order); beyond that only the `files_summary`
-   * counters on the task row carry the full count.
+   * Replace the `task_files` rows of a task. Stores at most the first
+   * TASK_FILES_MAX files (by the caller's order); beyond that only the
+   * `files_summary` counters on the task row carry the full count.
+   * Defense in depth (m3/m4): the ≤200-line cap is re-enforced and every
+   * path re-sanitized here, not just in `unifiedDiff` — hostile rows never
+   * reach the DB, and no NUL byte ever reaches it either.
    */
   saveTaskFiles(
     taskId: number,
@@ -400,8 +407,21 @@ export class Store {
         const ins = this.db.prepare(
           'INSERT INTO task_files (task_id, path, added, removed, diff, truncated, binary) VALUES (?, ?, ?, ?, ?, ?, ?)',
         );
-        for (const f of list.slice(0, 50)) {
-          ins.run(taskId, f.path, f.added, f.removed, f.diff, f.truncated ? 1 : 0, f.binary ? 1 : 0);
+        for (const f of list.slice(0, TASK_FILES_MAX)) {
+          const safePath = sanitizeDiffPath(f.path);
+          if (safePath === null) continue;
+          const capped = f.diff === null ? null : enforceDiffCap(f.diff, DIFF_MAX_LINES);
+          const cut = capped !== null && f.diff !== null && capped !== f.diff;
+          const dirty = f.diff !== null && f.diff.includes('\0');
+          ins.run(
+            taskId,
+            safePath,
+            f.added,
+            f.removed,
+            dirty ? null : capped,
+            f.truncated || cut || dirty ? 1 : 0,
+            f.binary || dirty ? 1 : 0,
+          );
         }
       },
     );
