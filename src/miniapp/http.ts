@@ -1,0 +1,364 @@
+import { execFileSync } from 'node:child_process';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { closeSync, existsSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { Server, ServerResponse } from 'node:http';
+import { extname, join, normalize, resolve, sep } from 'node:path';
+import { VERSION } from '../version.js';
+
+/**
+ * W1 foundation: node:http listener + Telegram initData HMAC guard (D8) +
+ * static placeholder serving. No new runtime deps.
+ *
+ * Auth rule (PLAN-V05 §5): every request except `GET /health` must carry
+ * `X-Telegram-Init-Data`. The user id is taken ONLY from the verified `user`
+ * field inside that header — never from the body or the URL query.
+ */
+
+export interface MiniServerDeps {
+  botToken: string;
+  allowedChatIds: number[];
+  /** Defaults to `<cwd>/web`. Overridable for offline tests. */
+  webDir?: string;
+  log?: (line: string) => void;
+}
+
+export type AuthError = 'E_AUTH' | 'E_FORBIDDEN' | 'E_STALE';
+
+export type AuthVerdict = { ok: true; userId: number } | { ok: false; status: number; error: AuthError };
+
+/** `auth_date` older than this (seconds) is rejected as stale. */
+export const AUTH_WINDOW_S = 86400;
+
+const BIND_HOST = '127.0.0.1';
+
+const CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+/** Key excluded from the data-check string; the literal lives on this line only. */
+const OMIT = 'hash';
+
+function fail(status: number, error: AuthError): AuthVerdict {
+  return { ok: false, status, error };
+}
+
+/**
+ * Verify raw Telegram initData. Pure function — no I/O, offline-testable.
+ * The digest comparison runs through timingSafeEqual on equal-length buffers.
+ */
+export function verifyInitData(
+  raw: string | null | undefined,
+  botToken: string,
+  allowed: number[],
+): AuthVerdict {
+  if (raw === null || raw === undefined || raw === '') return fail(401, 'E_AUTH');
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(raw);
+  } catch {
+    return fail(401, 'E_AUTH');
+  }
+  const received = params.get(OMIT);
+  if (received === null || received === '') return fail(401, 'E_AUTH');
+
+  const entries: Array<[string, string]> = [];
+  for (const [k, v] of params) {
+    if (k !== OMIT) entries.push([k, v]);
+  }
+  entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+  const checkString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
+
+  // secret_key = HMAC_SHA256(bot_token, "WebAppData") per Telegram validation docs.
+  const derived = createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const expectedHex = createHmac('sha256', derived).update(checkString).digest('hex');
+  const a = Buffer.from(received, 'utf8');
+  const b = Buffer.from(expectedHex, 'utf8');
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return fail(401, 'E_AUTH');
+
+  const at = Number(params.get('auth_date'));
+  if (!Number.isFinite(at)) return fail(401, 'E_AUTH');
+  if (Date.now() / 1000 - at > AUTH_WINDOW_S) return fail(400, 'E_STALE');
+
+  let uid = -1;
+  try {
+    const parsed = JSON.parse(params.get('user') ?? '') as { id?: unknown };
+    const n = parsed.id;
+    if (typeof n === 'number' && Number.isInteger(n)) uid = n;
+  } catch {
+    return fail(401, 'E_AUTH');
+  }
+  if (uid <= 0) return fail(401, 'E_AUTH');
+  if (!allowed.includes(uid)) return fail(403, 'E_FORBIDDEN');
+  return { ok: true, userId: uid };
+}
+
+/** Short SHA of the working tree, or 'unknown' outside a git checkout. */
+function shortSha(): string {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+function json(res: ServerResponse, status: number, obj: unknown): void {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+
+export interface MiniServer {
+  listen(port: number): Promise<{ port: number }>;
+  close(): Promise<void>;
+}
+
+export function createMiniServer(deps: MiniServerDeps): MiniServer {
+  const say = deps.log ?? ((): void => undefined);
+  const webDir = deps.webDir ?? resolve(process.cwd(), 'web');
+  // Resolve once at startup: a per-request `git` spawn costs ~50 ms on
+  // Windows and would blow the AC1 "< 50 ms" health budget.
+  const buildSha = shortSha();
+  let srv: Server | null = null;
+
+  const serveStatic = (path: string, method: string, res: ServerResponse): void => {
+    const name = path === '/' ? 'index.html' : path.slice(1);
+    let rel = '';
+    try {
+      rel = decodeURIComponent(name);
+    } catch {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    const abs = normalize(join(webDir, rel));
+    if (abs !== webDir && !abs.startsWith(webDir + sep)) {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    let isFile = false;
+    try {
+      isFile = statSync(abs).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!isFile || !existsSync(abs)) {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    if (method !== 'GET') {
+      json(res, 405, { error: 'E_METHOD_NOT_ALLOWED' });
+      return;
+    }
+    const type = CONTENT_TYPES[extname(abs).toLowerCase()] ?? 'application/octet-stream';
+    let body: Buffer;
+    try {
+      body = readFileSync(abs);
+    } catch {
+      json(res, 404, { error: 'E_NOT_FOUND' });
+      return;
+    }
+    res.writeHead(200, { 'content-type': type });
+    res.end(body);
+  };
+
+  function listen(port: number): Promise<{ port: number }> {
+    return new Promise((resolveP, rejectP) => {
+      const s = createServer((req, res) => {
+        const method = req.method ?? 'GET';
+        let path = '/';
+        try {
+          path = new URL(req.url ?? '/', `http://${BIND_HOST}/`).pathname;
+        } catch {
+          json(res, 404, { error: 'E_NOT_FOUND' });
+          return;
+        }
+        if (path === '/health') {
+          if (method !== 'GET') {
+            json(res, 405, { error: 'E_METHOD_NOT_ALLOWED' });
+            return;
+          }
+          json(res, 200, { ok: true, version: VERSION, sha: buildSha });
+          return;
+        }
+        const rawHeader = req.headers['x-telegram-init-data'];
+        const raw = Array.isArray(rawHeader) ? (rawHeader[0] ?? '') : (rawHeader ?? '');
+        const verdict = verifyInitData(raw, deps.botToken, deps.allowedChatIds);
+        if (!verdict.ok) {
+          json(res, verdict.status, { error: verdict.error });
+          return;
+        }
+        serveStatic(path, method, res);
+      });
+      srv = s;
+      s.once('error', (err: unknown) => {
+        const code = (err as { code?: string }).code;
+        if (code === 'EADDRINUSE') {
+          say(`E_PORT_BUSY: port ${String(port)} is taken (set MINIAPP_PORT to a free port)`);
+          rejectP(new Error(`E_PORT_BUSY: port ${String(port)} is taken`));
+        } else {
+          rejectP(err as Error);
+        }
+      });
+      s.listen(port, BIND_HOST, () => {
+        const addr = s.address();
+        const real = typeof addr === 'object' && addr !== null ? addr.port : port;
+        say(`miniapp: listening on ${BIND_HOST}:${String(real)}`);
+        resolveP({ port: real });
+      });
+    });
+  }
+
+  function close(): Promise<void> {
+    return new Promise((resolveP, rejectP) => {
+      if (srv === null) {
+        resolveP();
+        return;
+      }
+      const s = srv;
+      srv = null;
+      try {
+        s.closeAllConnections();
+      } catch {
+        // older node: fall through to close()
+      }
+      s.close((err) => {
+        if (err !== undefined && err !== null) rejectP(err as Error);
+        else {
+          say('miniapp: http server closed');
+          resolveP();
+        }
+      });
+    });
+  }
+
+  return { listen, close };
+}
+
+/**
+ * Single-instance guard: the first process creates the lock file, a second
+ * process finds a live pid inside and refuses to start (AC5). A lock left by
+ * a dead pid is taken over. Returns false + logs E_ALREADY_RUNNING on refusal.
+ */
+export function acquirePidLock(lockPath: string, say: (line: string) => void = (): void => undefined): boolean {
+  try {
+    const fd = openSync(lockPath, 'wx');
+    writeFileSync(fd, `${String(process.pid)}\n`);
+    closeSync(fd);
+    return true;
+  } catch {
+    let prev = '';
+    try {
+      prev = readFileSync(lockPath, 'utf8').trim();
+    } catch {
+      say(`E_ALREADY_RUNNING: lock file ${lockPath} is unreadable`);
+      return false;
+    }
+    const pid = Number(prev);
+    // Fail closed: even our own pid inside means "already started" — a second
+    // start attempt must never slip through, whatever process it comes from.
+    if (prev !== '' && Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        try {
+          writeFileSync(lockPath, `${String(process.pid)}\n`);
+          return true;
+        } catch {
+          say(`E_ALREADY_RUNNING: lock file ${lockPath} is not writable`);
+          return false;
+        }
+      }
+      say(`E_ALREADY_RUNNING: another instance holds ${lockPath} (pid ${prev})`);
+      return false;
+    }
+    say(`E_ALREADY_RUNNING: lock file ${lockPath} exists (unparseable holder)`);
+    return false;
+  }
+}
+
+/** Remove the lock file, but only when it still holds our own pid. */
+export function releasePidLock(lockPath: string): void {
+  try {
+    const prev = readFileSync(lockPath, 'utf8').trim();
+    if (prev === String(process.pid)) rmSync(lockPath, { force: true });
+  } catch {
+    // already gone — nothing to release
+  }
+}
+
+/**
+ * Heartbeat writer (AC7): refreshes `filePath` with the current timestamp so
+ * the Mini App can show "бот недоступен" when the file goes stale (> 90 s).
+ * Returns a stop function; stopping lets the file go stale naturally.
+ */
+export function startHeartbeat(
+  filePath: string,
+  intervalMs = 30000,
+  say: (line: string) => void = (): void => undefined,
+): () => void {
+  const beat = (): void => {
+    try {
+      writeFileSync(filePath, `${String(Date.now())}\n`);
+    } catch {
+      // logging must never crash the bot; same for the heartbeat
+    }
+  };
+  beat();
+  const timer = setInterval(beat, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  say(`heartbeat: writing ${filePath} every ${String(Math.round(intervalMs / 1000))}s`);
+  let stopped = false;
+  return () => {
+    if (!stopped) {
+      stopped = true;
+      clearInterval(timer);
+    }
+  };
+}
+
+/** Minimal grammy surface the menu-button wiring needs (fake-friendly). */
+export interface MenuButtonApi {
+  setChatMenuButton(args: {
+    chat_id?: number;
+    menu_button?: { type: 'web_app'; text: string; web_app: { url: string } };
+  }): Promise<unknown>;
+}
+
+/**
+ * Menu-button wiring (D1): the bridge has zero knowledge of Tailscale or
+ * Cloudflare — the public URL arrives from env only. Empty url → one skip
+ * line, no API calls. Errors are logged, never thrown.
+ */
+export async function wireMenuButton(
+  api: MenuButtonApi,
+  miniUrl: string,
+  chatIds: number[],
+  say: (line: string) => void = (): void => undefined,
+): Promise<void> {
+  if (miniUrl === '') {
+    say('menu-button: skipped (no MINIAPP_URL)');
+    return;
+  }
+  for (const id of chatIds) {
+    try {
+      await api.setChatMenuButton({
+        chat_id: id,
+        menu_button: { type: 'web_app', text: 'App', web_app: { url: miniUrl } },
+      });
+      say(`menu-button: set for chat ${String(id)}`);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      say(`menu-button: failed for chat ${String(id)}: ${m.slice(0, 120)}`);
+    }
+  }
+}

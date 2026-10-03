@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { join, resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import type { Config } from './config.js';
 import { TaskQueue } from './core/queue.js';
@@ -18,6 +19,7 @@ import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 import { probeRichSupport } from './telegram/rich.js';
 import { startCiPoller } from './github/ciPoller.js';
+import { acquirePidLock, createMiniServer, releasePidLock, startHeartbeat, wireMenuButton } from './miniapp/http.js';
 import { log } from './log.js';
 import { VERSION } from './version.js';
 
@@ -43,6 +45,14 @@ function logResolvedBins(cfg: Config): void {
 }
 
 async function main(): Promise<void> {
+  const dataDir = resolve(process.cwd(), 'data');
+  mkdirSync(dataDir, { recursive: true });
+  // A second instance must never start polling: it would duplicate every reply.
+  const lockPath = join(dataDir, 'bridge.pid');
+  if (!acquirePidLock(lockPath, log)) {
+    process.exit(1);
+    return;
+  }
   const cfg = loadConfig();
   mkdirSync(cfg.workRoot, { recursive: true });
   const store = new Store(cfg.dbPath);
@@ -104,8 +114,29 @@ async function main(): Promise<void> {
 
   startCiPoller(cfg, store, deps.io);
 
+  // Mini App HTTP layer (W1): heartbeat so the client can show
+  // "бот недоступен" when this process dies, menu-button wiring (D1),
+  // then the node:http listener on loopback only.
+  const stopHeartbeat = startHeartbeat(join(dataDir, 'heartbeat'), 30000, log);
+  await wireMenuButton(bot.api, cfg.miniUrl, cfg.allowedChatIds, log);
+  const mini = createMiniServer({ botToken: cfg.botToken, allowedChatIds: cfg.allowedChatIds, log });
+  try {
+    await mini.listen(cfg.miniPort);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    if (!m.includes('E_PORT_BUSY')) log(`miniapp: failed to start: ${m.slice(0, 200)}`);
+    stopHeartbeat();
+    releasePidLock(lockPath);
+    store.close();
+    process.exit(1);
+    return;
+  }
+
   const stop = (): void => {
     log('stopping...');
+    stopHeartbeat();
+    releasePidLock(lockPath);
+    void mini.close();
     void bot.stop();
     store.close();
   };

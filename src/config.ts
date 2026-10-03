@@ -38,6 +38,10 @@ export interface Config {
   /** How often the CI poller ticks. */
   ciPollMs: number;
   dbPath: string;
+  /** Port for the Mini App HTTP server (same process as polling). */
+  miniPort: number;
+  /** Public URL of the Mini App. Empty = skip menu-button wiring (D1). */
+  miniUrl: string;
 }
 
 function loadDotEnv(): void {
@@ -138,5 +142,7 @@ export function loadConfig(): Config {
     ffmpegBin: resolveBin(str('FFMPEG_BIN').trim(), 'ffmpeg'),
     ciPollMs: num('CI_POLL_MS', 300000),
     dbPath: resolve(process.cwd(), str('DB_PATH', './data/bridge.db')),
+    miniPort: num('MINIAPP_PORT', 8080),
+    miniUrl: str('MINIAPP_URL').trim(),
   };
 }
