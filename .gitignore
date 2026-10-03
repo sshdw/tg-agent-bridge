@@ -1,7 +1,8 @@
 node_modules/
 dist/
 .env
-work/
+work/*
+!work/verify-w*.mjs
 data/
 *.db
 *.db-journal
