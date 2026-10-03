@@ -1,0 +1,522 @@
+/* ============================================================================
+ * telegram-liquid-glass — references/tokens.css
+ *
+ * SINGLE SOURCE OF TRUTH for all design tokens of the Telegram Mini App.
+ * Do NOT duplicate these values anywhere else: components, pages and future
+ * styles must reference these custom properties, never hardcode their own
+ * blur/alpha/radius/shadow numbers.
+ *
+ * Provenance: distilled from docs/research/R2-LIQUID-GLASS.md (§2–§6).
+ * All blur/alpha/saturation numbers are PROJECT design tokens (Apple
+ * publishes no Liquid Glass numbers; Telegram's implementation is closed).
+ * Spring constants are analytically derived project constants, UNVERIFIED
+ * against Telegram (closed code).
+ *
+ * Honesty rule: NOTHING here is real refraction. The web has no CSS
+ * "refract the background" primitive. What ships is a labelled SIMULATION
+ * (blur + edge highlights + fake texture shift + scroll-linked micro-motion).
+ * See "Refraction simulation stack" below. This file contains no hosting,
+ * tunnel, or VPN decisions — those do not belong in a design-system skill.
+ * Accent comes ONLY from Telegram themeParams — there is no fixed accent
+ * hex anywhere in this skill.
+ * ========================================================================== */
+
+:root {
+  /* ---- Telegram themeParams -> token mapping (full table in theme.md).
+   * Every token resolves live themeParam first, neutral fallback second.
+   * Fallbacks are documented NEUTRALS (grays), never accent colors. ---- */
+  --surface-solid:   var(--tg-theme-bg-color, var(--bg));
+  --surface-section: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, var(--bg-secondary)));
+  --surface-header:  var(--tg-theme-header-bg-color, var(--surface-solid));
+  --surface-bar:     var(--tg-theme-bottom-bar-bg-color, var(--surface-section));
+  --ink:             var(--tg-theme-text-color, var(--text));
+  --ink-hint:        var(--tg-theme-hint-color, var(--text-hint));
+  --ink-sub:         var(--tg-theme-subtitle-text-color, var(--ink-hint));
+  --ink-section:     var(--tg-theme-section-header-text-color, var(--ink-hint));
+  --line:            var(--tg-theme-section-separator-color, var(--hairline-soft));
+  --danger:          var(--tg-theme-destructive-text-color, #e5484d);
+  /* --danger fallback #e5484d is a documented DESTRUCTIVE neutral-red
+   * (project token), not an accent: used only for destructive actions. */
+
+  /* ---- Accent: theme-mapped ONLY. No fixed accent hex exists. ----
+   * accent-action  = primary actions, selected tab, progress
+   * accent-text    = links, status highlights
+   * Order: accent_text_color -> button_color -> link_color (theme.md). */
+  --accent-action: var(--tg-theme-accent-text-color, var(--tg-theme-button-color, var(--tg-theme-link-color, currentColor)));
+  --accent-text:   var(--tg-theme-accent-text-color, var(--tg-theme-link-color, var(--tg-theme-button-color, currentColor)));
+  --on-accent:     var(--tg-theme-button-text-color, var(--ink));
+
+  /* ---- Fallback neutrals: used ONLY pre-ready() when themeParams is
+   * empty. Grays documented here; never used as accent. ---- */
+  --bg:            #17212b;   /* close to Telegram dark bg */
+  --bg-secondary:  #0e1621;
+  --text:          #f5f6f7;
+  --text-hint:     #8d9aa8;
+
+  /* ---- Typography (Apple HIG: iOS default 17pt, minimum 11pt) ----
+   * No light weights: Regular / Medium / Semibold / Bold only. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+               system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+
+  --fs-display: 28px;  --lh-display: 32px;  --fw-display: 700;
+  --fs-title:   20px;  --lh-title:   24px;  --fw-title:   600;
+  --fs-body:    17px;  --lh-body:    22px;  --fw-body:    400;
+  --fs-sub:     15px;  --lh-sub:     20px;  --fw-sub:     400;
+  --fs-caption: 13px;  --lh-caption: 16px;  --fw-caption: 400;
+
+  /* ---- Spacing scale (4px base). No ad-hoc px values outside this scale. ---- */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
+
+  /* ---- Radius scale ---- */
+  --r-xs: 8px; --r-sm: 12px; --r-md: 16px; --r-lg: 20px; --r-xl: 28px;
+  --r-pill: 999px;
+
+  /* ---- Border alpha (hairlines) ---- */
+  --hairline:      rgba(255, 255, 255, 0.14);
+  --hairline-soft: rgba(255, 255, 255, 0.08);
+  --hairline-dark: rgba(0, 0, 0, 0.10);
+
+  /* ---- Elevation: two levels, no "3D" ---- */
+  --elev-1:
+      0 1px 2px rgba(0, 0, 0, 0.18),
+      0 4px 16px rgba(0, 0, 0, 0.14);
+  --elev-2:
+      0 2px 6px rgba(0, 0, 0, 0.22),
+      0 12px 32px rgba(0, 0, 0, 0.20);
+
+  /* ---- TIER 0 — CONTENT: flat / translucent, minimal blur, thin
+   * dividers, generous whitespace. NEVER backdrop-filter. ---- */
+  --content-bg:      var(--surface-section);
+  --content-divider: var(--line);
+
+  /* ---- TIER 1 — FLOATING CONTROLS: LIGHT glass ----
+   * e.g. floating [Stop] [Details] bar. Second tier, restrained. */
+  --float-tint: rgba(255, 255, 255, 0.08); /* project token */
+  --float-blur: 20px;
+  --float-sat:  160%;
+
+  /* ---- TIER 2 — NAVIGATION: STRONG Liquid Glass ----
+   * The 4-tab bar only. Maximum glass: full simulation stack. */
+  --nav-tint: rgba(255, 255, 255, 0.12); /* project token */
+  --nav-blur: 28px;   /* absolute MAX anywhere */
+  --nav-sat:  180%;
+
+  /* ---- Refraction SIMULATION ingredients (all eight, labelled) ----
+   * (1) backdrop blur ............ backdrop-filter on .glass-*
+   * (2) dynamic edge highlight .... --sim-edge + scroll-linked ::before
+   * (3) background-texture fake .... --sim-tex gradient overlay, shifts
+   *      with scroll (a positioned gradient, NOT pixel displacement)
+   * (4) travelling specular ....... ::after specular, scroll-linked shift
+   * (5) soft inner bleed/glow ..... --sim-bleed inset shadow (neutral
+   *      white, NOT colored glow — neon/colored glow stays banned)
+   * (6) spring/morph .............. --spring-* curves + nav indicator
+   *      morph (transform/width only, see motion.md)
+   * (7) subtle parallax ............ translate3d ≤ 8px, scroll-linked
+   * (8) scroll-driven material ..... background-color alpha ramp on
+   *      nav + floating controls (blur stays PINNED — animating blur
+   *      in scroll keyframes is banned, see motion.md) */
+  --sim-edge:   rgba(255, 255, 255, 0.28);
+  --sim-edge-dim: rgba(255, 255, 255, 0.12); /* project token */
+  --sim-bleed:  rgba(255, 255, 255, 0.05);
+  --sim-tex: linear-gradient(115deg, /* stops are project tokens */
+      rgba(255, 255, 255, 0.045) 0%,
+      rgba(255, 255, 255, 0.000) 28%,
+      rgba(255, 255, 255, 0.060) 50%,
+      rgba(255, 255, 255, 0.000) 72%,
+      rgba(255, 255, 255, 0.045) 100%);
+
+  /* Capsule ceiling: blur <= 12px on capsules, always. */
+  --blur-cap: 12px;
+  --sat-off: 100%;
+
+  /* ---- Safe area: env() + Telegram content inset, merged with max() ----
+   * Device UI (notch, home bar) arrives via env(safe-area-inset-*).
+   * Telegram UI (its header, native bottom buttons) arrives via JS as
+   * --tg-content-safe-area-inset-* (see SKILL.md wiring). max() avoids
+   * double-counting where both agree and avoids zero where Telegram
+   * reports 0 but iOS does not. */
+  --safe-top:    max(env(safe-area-inset-top, 0px),    var(--tg-content-safe-area-inset-top, 0px));
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-content-safe-area-inset-bottom, 0px));
+  --safe-left:   max(env(safe-area-inset-left, 0px),   var(--tg-content-safe-area-inset-left, 0px));
+  --safe-right:  max(env(safe-area-inset-right, 0px),  var(--tg-content-safe-area-inset-right, 0px));
+
+  /* ---- Stable viewport height for bottom-pinned UI ----
+   * Set from JS on viewportChanged (isStateStable only). Never use
+   * viewportHeight for pinning — Telegram docs forbid it. */
+  --tg-viewport-stable-height: 100svh;
+}
+
+/* ==========================================================================
+ * TIER 0 — CONTENT. Flat surfaces, thin dividers. The default for every
+ * card, row, section, header, empty state, skeleton. NO glass here —
+ * "glass on every card" is a checklist violation (checklist.md C1).
+ * ========================================================================== */
+
+.app-bg {
+  background: var(--surface-solid);
+}
+
+.content-card {
+  border-radius: var(--r-lg);
+  background: var(--content-bg);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+
+/* Legacy alias: pre-D6 `.solid-card` == content surface. New code uses
+ * `.content-card`; both are flat, neither ever gets backdrop-filter. */
+.solid-card {
+  border-radius: var(--r-lg);
+  background: var(--content-bg);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+
+.divider {
+  height: 1px;
+  background: var(--content-divider);
+  border: 0;
+}
+
+.list-row {
+  background: transparent;
+  border-bottom: 1px solid var(--content-divider);
+}
+
+/* ==========================================================================
+ * TIER 1 — FLOATING CONTROLS. Light glass. Only floating action bars
+ * (e.g. [Stop] [Details]), never content. Simulation ingredients used:
+ * (1) blur, (4) specular ::after, (5) bleed, (6) press spring, (8) scroll
+ * material ramp via .glass-float--reactive.
+ * ========================================================================== */
+
+.glass-float {
+  position: relative;
+  border-radius: var(--r-pill);
+  background: var(--float-tint);
+  backdrop-filter: blur(var(--float-blur)) saturate(var(--float-sat));
+  -webkit-backdrop-filter: blur(var(--float-blur)) saturate(var(--float-sat));
+  box-shadow:
+    var(--elev-1),
+    inset 0 0 0 1px var(--hairline-soft),
+    inset 0 10px 12px -12px var(--sim-bleed);   /* (5) soft inner bleed */
+}
+/* (4) travelling specular: thin feathered top strip */
+.glass-float::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.00) 0%,
+    var(--sim-edge-dim) 25%,
+    var(--sim-edge) 50%,
+    var(--sim-edge-dim) 75%,
+    rgba(255, 255, 255, 0.00) 100%
+  );
+  pointer-events: none;
+}
+
+/* ==========================================================================
+ * TIER 2 — NAVIGATION. Strong Liquid Glass. The 4-tab bar ONLY.
+ * Full simulation stack (ingredients 1–8). Nothing else in the app may
+ * use this tier.
+ * ========================================================================== */
+
+.glass-nav {
+  position: relative;
+  border-radius: var(--r-xl);
+  background: var(--nav-tint);
+  backdrop-filter: blur(var(--nav-blur)) saturate(var(--nav-sat));
+  -webkit-backdrop-filter: blur(var(--nav-blur)) saturate(var(--nav-sat));
+  box-shadow:
+    var(--elev-2),
+    inset 0 0 0 1px var(--hairline-soft),
+    inset 0 12px 14px -12px var(--sim-bleed),    /* (5) inner bleed */
+    inset 0 -8px 12px -12px var(--sim-bleed);    /* (5) bounce light, bottom */
+}
+/* (2)+(4) dynamic edge highlight + specular: top glint strip */
+.glass-nav::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.00) 0%,
+    var(--sim-edge-dim) 22%,
+    var(--sim-edge) 50%,
+    var(--sim-edge-dim) 78%,
+    rgba(255, 255, 255, 0.00) 100%
+  );
+  pointer-events: none;
+}
+/* (4) specular ring: hairline frame that reads as a lens edge */
+.glass-nav::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+/* (3) fake background-texture distortion: a positioned sheen layer that
+ * shifts with scroll. SIMULATION ONLY — it moves a gradient, it does not
+ * displace background pixels (real refraction is impossible in CSS). */
+.glass-tex {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--sim-tex);
+  background-size: 220% 100%;
+  background-position: 30% 0;
+  pointer-events: none;
+}
+
+/* (7)+(8) scroll-driven material change on nav + floating controls:
+ * tint alpha ramps, edge highlight breathes, texture sheen travels,
+ * whole bar parallaxes ≤ 8px. Blur stays PINNED. transform/background
+ * only. Full mode only; all other modes force static (performance.md). */
+@keyframes nav-material {
+  /* ±6px parallax + alpha ramp are project tokens; blur stays PINNED */
+  from {
+    background-color: rgba(255, 255, 255, 0.07);
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    background-color: rgba(255, 255, 255, 0.14);
+    transform: translate3d(0, -6px, 0);
+  }
+}
+.glass-nav--reactive {
+  animation: nav-material linear both;
+  animation-timeline: scroll();
+  animation-range: 0px 240px; /* project token */
+  will-change: auto; /* NEVER will-change: filter/opacity — backdrop root */
+}
+.glass-nav--reactive::before { opacity: 0.7; }
+.glass-nav--reactive .glass-tex { background-position: 70% 0; }
+
+@keyframes float-material {
+  /* ±4px parallax + alpha ramp are project tokens; blur stays PINNED */
+  from {
+    background-color: rgba(255, 255, 255, 0.06);
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    background-color: rgba(255, 255, 255, 0.11);
+    transform: translate3d(0, -4px, 0);
+  }
+}
+.glass-float--reactive {
+  animation: float-material linear both;
+  animation-timeline: scroll();
+  animation-range: 0px 200px; /* project token */
+  will-change: auto;
+}
+
+/* Mandatory fallbacks: animation-timeline support in Telegram WebViews is
+ * UNVERIFIED, so the @supports branch is required, not optional. */
+@supports not (animation-timeline: scroll()) {
+  .glass-nav--reactive,
+  .glass-float--reactive { animation: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .glass-nav--reactive,
+  .glass-float--reactive { animation: none; }
+}
+:root[data-perf="reduced"] .glass-nav--reactive,
+:root[data-perf="reduced"] .glass-float--reactive,
+:root[data-perf="lite"] .glass-nav--reactive,
+:root[data-perf="lite"] .glass-float--reactive { animation: none; }
+
+/* ==========================================================================
+ * SYSTEM / TRANSIENT overlay: sheets, modals, toasts over media.
+ * Telegram theme colours + 35% dimming scrim (HIG `clear` over bright
+ * content). Scrim painted as a gradient layer so the declaration stays
+ * valid CSS (two bare colors in one `background` shorthand are not).
+ * ========================================================================== */
+
+.glass-elevated {
+  border-radius: var(--r-xl);
+  background:
+    linear-gradient(var(--glass-scrim, rgba(14, 22, 33, 0.35)), var(--glass-scrim, rgba(14, 22, 33, 0.35))),
+    var(--nav-tint);
+  backdrop-filter: blur(var(--nav-blur)) saturate(var(--nav-sat));
+  -webkit-backdrop-filter: blur(var(--nav-blur)) saturate(var(--nav-sat));
+  box-shadow: var(--elev-2), inset 0 0 0 1px var(--hairline);
+}
+
+/* ==========================================================================
+ * Capsule: segmented controls, status pills, pill buttons in the
+ * FUNCTIONAL layer only (nav-adjacent controls, floating bar buttons).
+ * Never inside content rows. Blur capped at 12px.
+ * ========================================================================== */
+
+.glass-capsule {
+  border-radius: var(--r-pill);
+  background: var(--float-tint);
+  backdrop-filter: blur(var(--blur-cap)) saturate(var(--float-sat));
+  -webkit-backdrop-filter: blur(var(--blur-cap)) saturate(var(--float-sat));
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+
+/* ==========================================================================
+ * Type helpers
+ * ========================================================================== */
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  /* System font only: WKWebView gives SF Pro on iOS, Roboto via
+   * system-ui on Android. Never load web fonts. */
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+}
+
+.h-display { font-size: var(--fs-display); line-height: var(--lh-display); font-weight: var(--fw-display); letter-spacing: -0.02em; }
+.h-title   { font-size: var(--fs-title);   line-height: var(--lh-title);   font-weight: var(--fw-title);   letter-spacing: -0.01em; }
+.h-sub     { font-size: var(--fs-sub);     line-height: var(--lh-sub);     font-weight: var(--fw-sub); }
+.h-caption { font-size: var(--fs-caption); line-height: var(--lh-caption); font-weight: var(--fw-caption); color: var(--ink-hint); }
+
+/* Tabular figures for cost/time/file-size: values must not "jump" on update. */
+.metric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  letter-spacing: -0.01em;
+}
+
+/* Monospace code and diffs: fixed width, solid background, NEVER glass. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-section);
+  border-radius: var(--r-sm);
+}
+
+/* Visible focus on every interactive element. Theme-mapped, no fixed hex. */
+:focus-visible {
+  outline: 2px solid var(--tg-theme-link-color, var(--tg-theme-accent-text-color, currentColor));
+  outline-offset: 2px;
+}
+
+/* ==========================================================================
+ * LIGHT THEME — first-class values, not "same as dark". Telegram's
+ * data-scheme is the source of truth; prefers-color-scheme is fallback
+ * for pre-ready(). Full derivation table: theme.md.
+ * ========================================================================== */
+
+:root[data-scheme="light"] {
+  --float-tint:        rgba(255, 255, 255, 0.55); /* project token */
+  --nav-tint:          rgba(255, 255, 255, 0.72); /* project token */
+  --glass-scrim:       rgba(0, 0, 0, 0.35);
+  --hairline:          rgba(0, 0, 0, 0.10);
+  --hairline-soft:     rgba(0, 0, 0, 0.06);
+  --sim-edge:          rgba(255, 255, 255, 0.65); /* project token */
+  --sim-edge-dim:      rgba(255, 255, 255, 0.28); /* project token */
+  --sim-bleed:         rgba(255, 255, 255, 0.10); /* project token */
+  --elev-1: 0 1px 2px rgba(16, 24, 34, 0.10), 0 4px 16px rgba(16, 24, 34, 0.08);
+  --elev-2: 0 2px 6px rgba(16, 24, 34, 0.14), 0 12px 32px rgba(16, 24, 34, 0.12);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-scheme="dark"]) {
+    --float-tint:        rgba(255, 255, 255, 0.55);
+    --nav-tint:          rgba(255, 255, 255, 0.72);
+    --glass-scrim:       rgba(0, 0, 0, 0.35);
+    --hairline:          rgba(0, 0, 0, 0.10);
+    --hairline-soft:     rgba(0, 0, 0, 0.06);
+    --sim-edge:          rgba(255, 255, 255, 0.65); /* project token */
+    --sim-edge-dim:      rgba(255, 255, 255, 0.28); /* project token */
+    --sim-bleed:         rgba(255, 255, 255, 0.10); /* project token */
+    --elev-1: 0 1px 2px rgba(16, 24, 34, 0.10), 0 4px 16px rgba(16, 24, 34, 0.08);
+    --elev-2: 0 2px 6px rgba(16, 24, 34, 0.14), 0 12px 32px rgba(16, 24, 34, 0.12);
+  }
+}
+
+/* Near-white failure fallback (set by JS detection, see theme.md):
+ * near-white glass over near-white content is unreadable, so ALL glass
+ * tiers collapse to solid. Mechanically checkable: [data-flat="1"]. */
+:root[data-flat="1"] .glass-nav,
+:root[data-flat="1"] .glass-float,
+:root[data-flat="1"] .glass-capsule,
+:root[data-flat="1"] .glass-elevated {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--surface-section);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+:root[data-flat="1"] .glass-nav::before,
+:root[data-flat="1"] .glass-nav::after,
+:root[data-flat="1"] .glass-float::before,
+:root[data-flat="1"] .glass-tex {
+  display: none;
+}
+
+/* ==========================================================================
+ * PERFORMANCE MODES. Three resolved modes — full | reduced | lite
+ * (ladder in performance.md). Applied as data-perf on :root, switched
+ * synchronously without reload (performance.md §4).
+ * ========================================================================== */
+
+/* reduced (from AVERAGE class or Auto heuristic): blur capped, motion cut */
+:root[data-perf="reduced"] {
+  --float-blur: 12px;
+  --nav-blur: 16px;
+  --float-sat: var(--sat-off);
+  --nav-sat: var(--sat-off);
+}
+:root[data-perf="reduced"] .glass-tex { display: none; }
+
+/* lite (from LOW class, weak heuristic, reduced-motion, or manual Lite):
+ * solid surfaces everywhere, opacity-only motion <= 150ms. */
+:root[data-perf="lite"] {
+  --float-blur: 12px;
+  --nav-blur: 12px;
+  --float-sat: var(--sat-off);
+  --nav-sat: var(--sat-off);
+}
+:root[data-perf="lite"] .glass-nav,
+:root[data-perf="lite"] .glass-float,
+:root[data-perf="lite"] .glass-capsule,
+:root[data-perf="lite"] .glass-elevated {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--surface-section);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+:root[data-perf="lite"] .glass-nav::before,
+:root[data-perf="lite"] .glass-nav::after,
+:root[data-perf="lite"] .glass-float::before,
+:root[data-perf="lite"] .glass-tex {
+  display: none;
+}
+
+/* OS-level reduced transparency: best-effort signal only (Experimental /
+ * limited availability; delivery into Telegram WebView UNVERIFIED). */
+@media (prefers-reduced-transparency: reduce) {
+  .glass-nav, .glass-float, .glass-capsule, .glass-elevated {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--surface-section);
+  }
+}
+
+/* Engine has no backdrop-filter: everything solid, always. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-nav, .glass-float, .glass-capsule, .glass-elevated {
+    backdrop-filter: none;
+    background: var(--surface-section);
+    box-shadow: inset 0 0 0 1px var(--hairline-soft);
+  }
+}
