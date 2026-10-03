@@ -813,8 +813,8 @@ W1 ──┬──▶ W2 ──▶ W3 ──╮
 
 | Wave | Status | Commit | Reviewer verdict | Assertions | Merged | Notes |
 |---|---|---|---|---|---|---|
-| W1 Foundation | IMPLEMENTED — ждёт re-review | `7e61fa2` (`c9abfff` + fix) на `origin/v05-w1` | 1-й раунд: APPROVE-WITH-FIXES (0 B / 2 M / 8 m) | 71 (было 38) + render 1249 + tables 430 | нет | Рефьюер дважды упёрся в rate limit провайдера; merge не выполняется без его вердикта. Фиксы M1/M2 проверены оркестратором вручную по коду |
-| W2 Durability | PENDING | — | — | — | — | Заблокирована вердиктом по W1 |
+| W1 Foundation | MERGED | `7e61fa2` → merge `bba50a0` | 1-й раунд: APPROVE-WITH-FIXES (0 B / 2 M / 8 m) → fix → 2-й раунд: **APPROVE (0/0/0)** | 71 + render 1249 + tables 430 | да, `bba50a0` | Живая проверка на проде: `/health` 200 `sha=bba50a0`, слушает только `127.0.0.1:8080`, heartbeat пишется, гвард режет без `initData` (401), второй инстанс падает с `E_ALREADY_RUNNING` (pid 3420). `MINIAPP_URL` намеренно не задан — туннель появится вместе с UI в W5 |
+| W2 Durability | IN PROGRESS | — | — | — | — | Зависит от W1 (merged) |
 | W3 Task engine | PENDING | — | — | — | — | — |
 | W4 API surface | PENDING | — | — | — | — | — |
 | W5 Shell + Home + Tasks | PENDING | — | — | — | — | — |
