@@ -311,9 +311,9 @@ export class Store {
     this.db.prepare('UPDATE tasks SET plan_origin = ?, plan_reworks = ? WHERE id = ?').run(origin, reworks, id);
   }
 
-  /** Empty `cost` clears the value; undefined leaves it untouched. */
+  /** Empty `cost` clears the value; undefined leaves it untouched. Bumps `rev` (§5). */
   setTaskCost(id: number, cost: number | null): void {
-    this.db.prepare('UPDATE tasks SET cost_usd = ? WHERE id = ?').run(cost, id);
+    this.db.prepare('UPDATE tasks SET cost_usd = ?, rev = rev + 1 WHERE id = ?').run(cost, id);
   }
 
   setTaskPlan(id: number, plan: string): void {
@@ -451,6 +451,9 @@ export class Store {
   }
 
   /** Mark pending approvals older than 24 h as expired. Returns rows swept. */
+  // NOTE (W4): this full-table sweep runs on every read (each chat message via
+  // hasApproval too); trivial at personal scale, revisit only if `?since_rev=`
+  // polling ever shows it hot.
   sweepExpiredApprovals(now = nowSec()): number {
     const r = this.db
       .prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE status = 'pending' AND created_at + ? < ?")

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { Bot, Context } from 'grammy';
 import type { Config } from '../config.js';
 import { AGENT_IDS } from '../config.js';
-import { resolveApproval } from '../core/approvals.js';
+import { approvalReply, resolveApproval } from '../core/approvals.js';
 import type { Responder } from '../core/queue.js';
 import { TaskQueue } from '../core/queue.js';
 import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
@@ -184,10 +184,9 @@ export function registerCallbacks(bot: Bot, deps: CallbackDeps): void {
       switch (parsed.scope) {
         case SCOPE.approve: {
           const ok = payload !== '';
-          const resolved = resolveApproval(chatId, ok);
-          await ctx.answerCallbackQuery({ text: ok ? 'Разрешено' : 'Отклонено' });
-          if (resolved) await ctx.reply(ok ? '✅ Разрешено.' : 'Отклонено.');
-          else await ctx.reply('Нечего подтверждать.');
+          const r = resolveApproval(chatId, ok);
+          await ctx.answerCallbackQuery({ text: r === 'live' ? (ok ? 'Разрешено' : 'Отклонено') : 'Не актуально' });
+          await ctx.reply(approvalReply(r, ok));
           break;
         }
 

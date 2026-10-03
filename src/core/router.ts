@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { type Bot } from 'grammy';
 import type { Config } from '../config.js';
 import { AGENT_IDS } from '../config.js';
-import { hasApproval, resolveApproval } from '../core/approvals.js';
+import { hasApproval, approvalReply, resolveApproval } from '../core/approvals.js';
 import {
   displayName,
   errorCode,
@@ -81,10 +81,8 @@ const pendingFiles = new Map<number, PendingEntry>();
 
 /** Inbound files live on disk (`<workdir>/inbox`); this map only remembers them. */
 interface PendingEntry {
-  /** Absolute paths saved for the next task. */
-  paths: string[];
-  /** `Date.now()` at receive time — entries older than the TTL are dropped. */
-  addedAt: number;
+  /** Each file carries its own receive time, so one append cannot extend another's TTL. */
+  files: { path: string; addedAt: number }[];
   /** Owning chat: `takeImages(chatId)` only ever returns its own entry. */
   chatId: number;
 }
@@ -109,31 +107,34 @@ export function takeImages(chatId: number): string[] {
   const entry = pendingFiles.get(chatId);
   pendingFiles.delete(chatId);
   if (!entry || entry.chatId !== chatId) return [];
-  return entry.paths;
+  return entry.files.map((f) => f.path);
 }
 
 /**
  * Remember inbound files for the next task. Exported so the W2 harness can
  * prove TTL + ownership offline; `receiveInboundFile` delegates here.
  */
-export function rememberInboundFiles(chatId: number, paths: string[]): void {
-  sweepPendingFiles();
+export function rememberInboundFiles(chatId: number, paths: string[], nowMs = Date.now()): void {
+  sweepPendingFiles(nowMs);
   const prev = pendingFiles.get(chatId);
-  const kept = prev && prev.chatId === chatId ? prev.paths : [];
-  pendingFiles.set(chatId, { paths: [...kept, ...paths], addedAt: Date.now(), chatId });
+  const kept = prev && prev.chatId === chatId ? prev.files : [];
+  pendingFiles.set(chatId, {
+    files: [...kept, ...paths.map((path) => ({ path, addedAt: nowMs }))],
+    chatId,
+  });
 }
 
 /**
- * Drop inbox entries older than 24 h. Files already live on disk — only the
- * "attach to next task" memory is forgotten. Returns entries dropped.
+ * Drop inbox files older than 24 h. Files already live on disk — only the
+ * "attach to next task" memory is forgotten. Returns files dropped.
  */
 export function sweepPendingFiles(nowMs = Date.now()): number {
   let dropped = 0;
   for (const [chatId, entry] of pendingFiles) {
-    if (nowMs - entry.addedAt > PENDING_FILES_TTL_MS) {
-      pendingFiles.delete(chatId);
-      dropped += 1;
-    }
+    const live = entry.files.filter((f) => nowMs - f.addedAt <= PENDING_FILES_TTL_MS);
+    dropped += entry.files.length - live.length;
+    if (live.length === 0) pendingFiles.delete(chatId);
+    else if (live.length !== entry.files.length) pendingFiles.set(chatId, { files: live, chatId });
   }
   return dropped;
 }
@@ -521,10 +522,10 @@ export function registerRouter(bot: Bot, deps: Deps): void {
 
   bot.command('approve', (ctx) => {
     const chatId = ctx.chat.id;
-    if (!resolveApproval(chatId, true)) return deps.io.notify(chatId, 'Нечего подтверждать.');
-    // The decision is made: drop the button's nonces so it cannot be tapped again.
-    clear(chatId, SCOPE.approve);
-    return deps.io.notify(chatId, '✅ Разрешено.');
+    const r = resolveApproval(chatId, true);
+    // A dead button must not stay up: the row is settled either way.
+    if (r !== 'none') clear(chatId, SCOPE.approve);
+    return deps.io.notify(chatId, approvalReply(r, true));
   });
 
   bot.command('new', (ctx) => {
@@ -649,9 +650,9 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     const text = ctx.message.text.trim();
     if (hasApproval(chatId)) {
       const ok = /^(да|yes|ага|ok|\+|approve)$/i.test(text);
-      resolveApproval(chatId, ok);
+      const r = resolveApproval(chatId, ok);
       clear(chatId, SCOPE.approve);
-      return deps.io.notify(chatId, ok ? '✅ Разрешено.' : 'Отклонено.');
+      return deps.io.notify(chatId, approvalReply(r, ok));
     }
     // WAVE2/EXEC (plan rework): plain text while a plan is parked = plan comment.
     if (await tryPlanRework(deps, chatId, text)) return;

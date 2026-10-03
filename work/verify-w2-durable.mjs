@@ -15,8 +15,10 @@ import Database from 'better-sqlite3';
 
 import { Store, PENDING_TTL_SEC } from '../dist/storage/db.js';
 import {
+  approvalReply,
   bindApprovalStore,
   hasApproval,
+  ORPHAN_APPROVAL_MSG,
   requestApproval,
   resolveApproval,
   resolveApprovalById,
@@ -131,7 +133,7 @@ const dbPath = (name) => join(dbDir, `${name}.db`);
   bindApprovalStore(s2);
   check('AC2: pending row survived reopen', s2.pendingApproval(111)?.command === 'ls /tmp');
   const ok = resolveApproval(111, false);
-  check('AC2: resolveApproval after reopen returns true', ok === true);
+  check('AC2: resolveApproval after reopen returns live', ok === 'live', String(ok));
   await p;
   check('AC2: runner promise resolved false', settled === false, String(settled));
   check('AC2: nothing left pending', s2.pendingApproval(111) === undefined);
@@ -155,7 +157,7 @@ const dbPath = (name) => join(dbDir, `${name}.db`);
   const miniWins = resolveApprovalById(rid, false);
   const chatLoses = resolveApproval(222, true);
   check('race: mini-app wins first', miniWins === 'ok', String(miniWins));
-  check('race: chat loses after', chatLoses === false);
+  check('race: chat loses after (nothing left)', chatLoses === 'none', String(chatLoses));
   await p1;
   check('race: runner got winner value', v1 === false, String(v1));
   // same race, chat first
@@ -167,14 +169,96 @@ const dbPath = (name) => join(dbDir, `${name}.db`);
   const rid2 = s.pendingApproval(222)?.id ?? -1;
   const chatWins = resolveApproval(222, true);
   const miniLoses = resolveApprovalById(rid2, true);
-  check('race: chat wins first', chatWins === true);
+  check('race: chat wins first', chatWins === 'live', String(chatWins));
   check('race: mini-app gets resolved', miniLoses === 'resolved', String(miniLoses));
   await p2;
   check('race: runner got winner value (2)', v2 === true, String(v2));
   s.close();
 }
 
-// ------------------------------------------------- AC8: expiry (approvals + drafts)
+// ------------------------------------------------- M1: orphan row must not claim success
+{
+  const s = new Store(dbPath('m1'));
+  bindApprovalStore(s);
+  // Row with NO waiter: the runner died with the previous process.
+  const oid = s.createApproval(777, 'orphan-cmd');
+  check('M1: hasApproval sees the row', hasApproval(777) === true);
+  const r = resolveApproval(777, true);
+  check('M1: chat path does not claim success', r === 'orphan', String(r));
+  check('M1: owner message is the honest one', approvalReply(r, true) === ORPHAN_APPROVAL_MSG);
+  check(
+    'M1: honest string never implies execution',
+    ORPHAN_APPROVAL_MSG === 'Команда больше не ждёт — задача прервана рестартом бота.',
+  );
+  check('M1: orphan settled denied', s.getApproval(oid)?.status === 'denied');
+  check('M1: second tap finds nothing', resolveApproval(777, true) === 'none');
+  check(
+    'M1: live mapping intact',
+    approvalReply('live', true) === '✅ Разрешено.' && approvalReply('live', false) === 'Отклонено.',
+  );
+  // cancel must skip the orphan and fall through (no plan/task here).
+  const q = new TaskQueue(s, cfg, fakeIo());
+  check('M1: cancel skips orphan approval', (await q.cancel(777)) === 'nothing');
+  s.close();
+}
+
+// ------------------------------------------------- M2a: stale bound id falls back to live row
+{
+  const s = new Store(dbPath('m2a'));
+  bindApprovalStore(s);
+  let v = 'unsettled';
+  const p = requestApproval(778, 'cmd-one').then((x) => {
+    v = x;
+  });
+  await tick();
+  const id1 = s.pendingApproval(778)?.id ?? -1;
+  check('M2a: setup back-resolve', s.resolveApproval(id1, 'denied') === 'ok');
+  const id2 = s.createApproval(778, 'cmd-two');
+  const r = resolveApproval(778, true);
+  check('M2a: falls back to live row', r === 'live', String(r));
+  await p;
+  check('M2a: waiter woken with tap value', v === true, String(v));
+  check('M2a: live row flipped', s.getApproval(id2)?.status === 'allowed');
+  s.close();
+}
+
+// ------------------------------------------------- M2b: terminally dead waiter settles deny, no hang
+{
+  const path = dbPath('m2b');
+  const s = new Store(path);
+  bindApprovalStore(s);
+  let v = 'unsettled';
+  const p = requestApproval(779, 'cmd-old').then((x) => {
+    v = x;
+  });
+  await tick();
+  const id = s.pendingApproval(779)?.id ?? -1;
+  s.close();
+  const raw = new Database(path);
+  raw
+    .prepare('UPDATE approvals SET created_at = ? WHERE id = ?')
+    .run(Math.floor(Date.now() / 1000) - PENDING_TTL_SEC - 10, id);
+  raw.close();
+  const s2 = new Store(path);
+  bindApprovalStore(s2);
+  const r = resolveApproval(779, true);
+  check('M2b: dead waiter reports orphan', r === 'orphan', String(r));
+  await p;
+  check('M2b: waiter settled deny', v === false, String(v));
+  check('M2b: nothing left afterwards', resolveApproval(779, true) === 'none');
+  s2.close();
+}
+
+// ------------------------------------------------- m1: cost update bumps rev (§5)
+{
+  const s = new Store(dbPath('m1cost'));
+  const id = s.createTask(111, 'mock', 'ask', 'cost rev', [], '');
+  const r0 = s.getTask(id)?.rev ?? -1;
+  s.setTaskCost(id, 0.05);
+  check('m1: cost update bumps rev', (s.getTask(id)?.rev ?? -1) === r0 + 1);
+  check('m1: cost stored', s.getTask(id)?.cost_usd === 0.05);
+  s.close();
+}
 {
   const path = dbPath('a8');
   const s = new Store(path);
@@ -380,6 +464,13 @@ const dbPath = (name) => join(dbDir, `${name}.db`);
   const dropped = sweepPendingFiles(Date.now() + 25 * 3600 * 1000);
   check('pendingFiles: 24h sweep drops stale', dropped >= 1, String(dropped));
   check('pendingFiles: swept entry gone', JSON.stringify(takeImages(333)) === '[]');
+  // m4: per-file TTL — appending must not extend older files of the same chat.
+  const NOW = Date.now();
+  rememberInboundFiles(881, ['/old/a.txt'], NOW - 23.5 * 3600 * 1000);
+  rememberInboundFiles(881, ['/new/b.txt']);
+  const dropped2 = sweepPendingFiles(NOW + 3600 * 1000);
+  check('m4: only the stale file dropped', dropped2 === 1, String(dropped2));
+  check('m4: fresh file survives', JSON.stringify(takeImages(881)) === '["/new/b.txt"]');
 }
 
 // ------------------------------------------------- no new runtime deps (plan rule §8.4)

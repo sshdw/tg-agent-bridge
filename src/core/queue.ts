@@ -205,7 +205,7 @@ export class TaskQueue {
       if (!this.pumping.has(chatId)) void this.pump(chatId);
       return null;
     }
-    const rounds = waiting.reworks + 1;
+    const rounds = reworks + 1;
     const task = this.store.getTask(waiting.taskId);
     const origin = waiting.origin !== '' ? waiting.origin : (task?.prompt ?? '');
     this.store.setTaskPlan(waiting.taskId, waiting.plan);
@@ -251,7 +251,9 @@ export class TaskQueue {
   }
 
   async cancel(chatId: number): Promise<'approval' | 'task' | 'plan' | 'nothing'> {
-    if (resolveApproval(chatId, false)) return 'approval';
+    // Only a LIVE waiter counts as an approval cancel; an orphaned row is
+    // settled as denied inside resolveApproval and cancel falls through.
+    if (resolveApproval(chatId, false) === 'live') return 'approval';
     const waiting = this.waitingFor(chatId);
     if (waiting) {
       this.planWaiting.delete(chatId);
