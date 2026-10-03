@@ -28,6 +28,20 @@ export interface TaskRow {
   plan_text: string | null;
   /** Preset that produced the task (/review, /test, /fix), '' when none. */
   preset: string | null;
+  /** Short title (first ~60 chars of prompt, set by W3). NULL until set. */
+  title: string | null;
+  /** Model at launch time. '' when unset. */
+  model: string;
+  /** Project/workdir at launch time. '' when unset. */
+  project: string;
+  /** JSON array of skill names attached at launch. '[]' when none. */
+  skills_used: string;
+  /** Cheap-polling counter, bumped +1 on every status change. */
+  rev: number;
+  /** Durable origin (implementation) prompt of a parked plan. NULL when none. */
+  plan_origin: string | null;
+  /** Durable rework rounds already spent on a parked plan. */
+  plan_reworks: number;
   created_at: number;
   finished_at: number | null;
 }
@@ -49,6 +63,34 @@ export interface CiWatchRow {
   created_at: number;
   updated_at: number;
 }
+
+/** One durable shell-approval row. `status`: pending|allowed|denied|expired. */
+export interface ApprovalRow {
+  id: number;
+  chat_id: number;
+  command: string;
+  status: string;
+  created_at: number;
+  resolved_at: number | null;
+}
+
+/** One pre-run confirmation-card row. `status`: open|confirmed|discarded|expired. */
+export interface DraftRow {
+  id: number;
+  chat_id: number;
+  prompt: string;
+  mode: string;
+  agent: string;
+  model: string;
+  project: string;
+  /** JSON array of pinned skill names. */
+  skills: string;
+  status: string;
+  created_at: number;
+}
+
+/** How long an approval or draft stays resolvable (24 h, seconds). */
+export const PENDING_TTL_SEC = 86400;
 
 /** Statuses that mean "this task is no longer owned by a live process". */
 const FINISHED_STATUSES = ['done', 'error', 'cancelled'] as const;
@@ -118,6 +160,34 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages (chat_id, id);
       CREATE INDEX IF NOT EXISTS idx_tasks_chat ON tasks (chat_id, status, id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_watch_chat_repo ON ci_watch (chat_id, repo);
+      CREATE TABLE IF NOT EXISTS approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        prompt TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'ask',
+        agent TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        project TEXT NOT NULL DEFAULT '',
+        skills TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS skill_pins (
+        chat_id INTEGER NOT NULL,
+        skill TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, skill)
+      );
+      CREATE INDEX IF NOT EXISTS idx_approvals_chat ON approvals (chat_id, status, id);
+      CREATE INDEX IF NOT EXISTS idx_drafts_chat ON drafts (chat_id, status, id);
     `);
 
     // v0.2: real agent sessions (opencode `ses_*`), NULL means "start a fresh one".
@@ -128,6 +198,16 @@ export class Store {
     this.addColumn('tasks', 'plan_text', 'TEXT');
     // v0.2: preset that produced the task (/review, /test, /fix), for /cost breakdowns.
     this.addColumn('tasks', 'preset', 'TEXT');
+    // v0.5 W2: durability for the Mini App (approvals, drafts, plans, cheap polling).
+    this.addColumn('tasks', 'title', 'TEXT');
+    this.addColumn('tasks', 'model', "TEXT DEFAULT ''");
+    this.addColumn('tasks', 'project', "TEXT DEFAULT ''");
+    this.addColumn('tasks', 'skills_used', "TEXT DEFAULT '[]'");
+    this.addColumn('tasks', 'rev', 'INTEGER DEFAULT 0');
+    this.addColumn('tasks', 'plan_origin', 'TEXT');
+    this.addColumn('tasks', 'plan_reworks', 'INTEGER DEFAULT 0');
+    // After every column exists (fresh and legacy DBs alike).
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_rev ON tasks (id, rev)');
   }
 
   private addColumn(table: string, column: string, type: string): void {
@@ -217,13 +297,23 @@ export class Store {
   setTaskStatus(id: number, status: string): void {
     const finished = status === 'pending' || status === 'running' ? null : nowSec();
     this.db
-      .prepare('UPDATE tasks SET status = ?, finished_at = ? WHERE id = ?')
+      .prepare('UPDATE tasks SET status = ?, finished_at = ?, rev = rev + 1 WHERE id = ?')
       .run(status, finished, id);
   }
 
-  /** Empty `cost` clears the value; undefined leaves it untouched. */
+  /** Cheap-polling counter bump without a status change (W4 `?since_rev=`). */
+  bumpRev(id: number): void {
+    this.db.prepare('UPDATE tasks SET rev = rev + 1 WHERE id = ?').run(id);
+  }
+
+  /** Durable plan metadata: origin prompt + spent rework rounds of a parked plan. */
+  setTaskPlanMeta(id: number, origin: string, reworks: number): void {
+    this.db.prepare('UPDATE tasks SET plan_origin = ?, plan_reworks = ? WHERE id = ?').run(origin, reworks, id);
+  }
+
+  /** Empty `cost` clears the value; undefined leaves it untouched. Bumps `rev` (§5). */
   setTaskCost(id: number, cost: number | null): void {
-    this.db.prepare('UPDATE tasks SET cost_usd = ? WHERE id = ?').run(cost, id);
+    this.db.prepare('UPDATE tasks SET cost_usd = ?, rev = rev + 1 WHERE id = ?').run(cost, id);
   }
 
   setTaskPlan(id: number, plan: string): void {
@@ -265,7 +355,9 @@ export class Store {
    */
   recoverStaleRunning(): number {
     const r = this.db
-      .prepare("UPDATE tasks SET status = 'pending', finished_at = NULL WHERE status = 'running'")
+      .prepare(
+        "UPDATE tasks SET status = 'pending', finished_at = NULL, rev = rev + 1 WHERE status = 'running'",
+      )
       .run();
     return r.changes;
   }
@@ -275,6 +367,13 @@ export class Store {
     return this.db
       .prepare("SELECT * FROM tasks WHERE chat_id = ? AND status = 'awaiting_plan' ORDER BY id ASC LIMIT 1")
       .get(chatId) as TaskRow | undefined;
+  }
+
+  /** Every parked plan (all chats) — boot restore of the in-memory plan map. */
+  awaitingPlans(): TaskRow[] {
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE status = 'awaiting_plan' ORDER BY id ASC")
+      .all() as TaskRow[];
   }
 
   costsSince(chatId: number, sinceSec: number): { total: number; priced: number; unpriced: number } {
@@ -298,6 +397,161 @@ export class Store {
          GROUP BY agent ORDER BY total DESC`,
       )
       .all(chatId, sinceSec) as { agent: string; total: number; n: number }[];
+  }
+
+  // -------------------------------------------------------------- approvals
+
+  /** Insert a pending approval, return its id. The chat-button and the Mini App race on it. */
+  createApproval(chatId: number, command: string): number {
+    const r = this.db
+      .prepare("INSERT INTO approvals (chat_id, command, status, created_at) VALUES (?, ?, 'pending', ?)")
+      .run(chatId, command, nowSec());
+    return Number(r.lastInsertRowid);
+  }
+
+  getApproval(id: number): ApprovalRow | undefined {
+    return this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(id) as
+      | ApprovalRow
+      | undefined;
+  }
+
+  /**
+   * Newest pending approval for a chat. Expired rows (older than 24 h) are
+   * swept to `expired` on read and never returned.
+   */
+  pendingApproval(chatId: number): ApprovalRow | undefined {
+    this.sweepExpiredApprovals();
+    return this.db
+      .prepare(
+        "SELECT * FROM approvals WHERE chat_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+      )
+      .get(chatId) as ApprovalRow | undefined;
+  }
+
+  /**
+   * Single-use resolve. ONE statement decides the winner of a chat-button vs
+   * Mini-App race: `UPDATE … WHERE status='pending'` flips exactly one row, so
+   * exactly one caller sees `changes === 1`. The loser gets `resolved`.
+   * Expired rows are swept to `expired` instead and report `expired`.
+   */
+  resolveApproval(id: number, decision: 'allowed' | 'denied'): 'ok' | 'resolved' | 'expired' | 'missing' {
+    const row = this.getApproval(id);
+    if (!row) return 'missing';
+    if (row.status !== 'pending') return 'resolved';
+    if (row.created_at + PENDING_TTL_SEC < nowSec()) {
+      this.db
+        .prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE id = ? AND status = 'pending'")
+        .run(nowSec(), id);
+      return 'expired';
+    }
+    const r = this.db
+      .prepare('UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ? AND status = ?')
+      .run(decision, nowSec(), id, 'pending');
+    return r.changes === 1 ? 'ok' : 'resolved';
+  }
+
+  /** Mark pending approvals older than 24 h as expired. Returns rows swept. */
+  // NOTE (W4): this full-table sweep runs on every read (each chat message via
+  // hasApproval too); trivial at personal scale, revisit only if `?since_rev=`
+  // polling ever shows it hot.
+  sweepExpiredApprovals(now = nowSec()): number {
+    const r = this.db
+      .prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE status = 'pending' AND created_at + ? < ?")
+      .run(now, PENDING_TTL_SEC, now);
+    return r.changes;
+  }
+
+  // ----------------------------------------------------------------- drafts
+
+  /** Insert an open pre-run confirmation card, return its id. */
+  createDraft(
+    chatId: number,
+    prompt: string,
+    mode = 'ask',
+    agent = '',
+    model = '',
+    project = '',
+    skills: string[] = [],
+  ): number {
+    const r = this.db
+      .prepare(
+        `INSERT INTO drafts (chat_id, prompt, mode, agent, model, project, skills, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+      )
+      .run(chatId, prompt, mode, agent, model, project, JSON.stringify(skills), nowSec());
+    return Number(r.lastInsertRowid);
+  }
+
+  getDraft(id: number): DraftRow | undefined {
+    return this.db.prepare('SELECT * FROM drafts WHERE id = ?').get(id) as DraftRow | undefined;
+  }
+
+  /** Newest open draft for a chat. Expired rows (older than 24 h) are swept on read. */
+  openDraft(chatId: number): DraftRow | undefined {
+    this.sweepExpiredDrafts();
+    return this.db
+      .prepare("SELECT * FROM drafts WHERE chat_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1")
+      .get(chatId) as DraftRow | undefined;
+  }
+
+  /**
+   * Single-use confirm/discard, same race contract as approvals: one
+   * `UPDATE … WHERE status='open'` statement, winner sees `changes === 1`.
+   */
+  confirmDraft(id: number): 'ok' | 'resolved' | 'expired' | 'missing' {
+    return this.finishDraft(id, 'confirmed');
+  }
+
+  discardDraft(id: number): 'ok' | 'resolved' | 'expired' | 'missing' {
+    return this.finishDraft(id, 'discarded');
+  }
+
+  private finishDraft(
+    id: number,
+    to: 'confirmed' | 'discarded',
+  ): 'ok' | 'resolved' | 'expired' | 'missing' {
+    const row = this.getDraft(id);
+    if (!row) return 'missing';
+    if (row.status !== 'open') return 'resolved';
+    if (row.created_at + PENDING_TTL_SEC < nowSec()) {
+      this.db
+        .prepare("UPDATE drafts SET status = 'expired' WHERE id = ? AND status = 'open'")
+        .run(id);
+      return 'expired';
+    }
+    const r = this.db
+      .prepare('UPDATE drafts SET status = ? WHERE id = ? AND status = ?')
+      .run(to, id, 'open');
+    return r.changes === 1 ? 'ok' : 'resolved';
+  }
+
+  /** Mark open drafts older than 24 h as expired. Returns rows swept. */
+  sweepExpiredDrafts(now = nowSec()): number {
+    const r = this.db
+      .prepare("UPDATE drafts SET status = 'expired' WHERE status = 'open' AND created_at + ? < ?")
+      .run(PENDING_TTL_SEC, now);
+    return r.changes;
+  }
+
+  // ------------------------------------------------------------- skill_pins
+
+  /** Replace the pinned-skill set of a chat (one transaction). */
+  setSkillPins(chatId: number, skills: string[]): void {
+    const t = nowSec();
+    const tx = this.db.transaction((list: string[]) => {
+      this.db.prepare('DELETE FROM skill_pins WHERE chat_id = ?').run(chatId);
+      const ins = this.db.prepare('INSERT INTO skill_pins (chat_id, skill, created_at) VALUES (?, ?, ?)');
+      for (const skill of list) ins.run(chatId, skill, t);
+    });
+    tx(skills);
+  }
+
+  /** Pinned skill names of a chat, oldest first. */
+  skillPins(chatId: number): string[] {
+    const rows = this.db
+      .prepare('SELECT skill FROM skill_pins WHERE chat_id = ? ORDER BY rowid ASC')
+      .all(chatId) as { skill: string }[];
+    return rows.map((r) => r.skill);
   }
 
   // --------------------------------------------------------------- ci_watch

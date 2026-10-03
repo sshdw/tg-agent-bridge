@@ -6,7 +6,7 @@ import type { Store } from '../storage/db.js';
 import { AttachCensor, outboundErrorMessage, planAttachments } from './files.js';
 import { resolveWorkdir } from './permissions.js';
 import { getOrCreate } from './sessions.js';
-import { resolveApproval } from './approvals.js';
+import { bindApprovalStore, resolveApproval } from './approvals.js';
 import { log } from '../log.js';
 
 export interface StreamHandle {
@@ -84,7 +84,58 @@ export class TaskQueue {
     private store: Store,
     private cfg: Config,
     private io: Responder,
-  ) {}
+  ) {
+    // The approvals bridge must point at the live database; a reopen builds a
+    // new Store + a new queue, which rebinds here. Plan fast-path state is
+    // rebuilt from the durable `awaiting_plan` rows right after.
+    bindApprovalStore(this.store);
+    this.restorePlans();
+  }
+
+  /**
+   * Boot restore: rebuild the fast-path plan map from durable `awaiting_plan`
+   * rows, so a parked plan survives a restart (W2 AC3). Memory stays a cache —
+   * the rows are the source of truth.
+   */
+  private restorePlans(): void {
+    try {
+      for (const row of this.store.awaitingPlans()) {
+        if (this.planWaiting.has(row.chat_id)) continue;
+        this.planWaiting.set(row.chat_id, {
+          taskId: row.id,
+          plan: row.plan_text ?? '',
+          reworks: row.plan_reworks ?? 0,
+          origin: row.plan_origin ?? row.prompt ?? '',
+        });
+      }
+    } catch {
+      // A store that cannot list plans must not break boot; chat flows fall
+      // back to per-chat lookups in `waitingFor`.
+    }
+  }
+
+  /**
+   * The parked plan for a chat: memory fast path first, durable row on a miss
+   * (cold boot). The miss populates the map, so later calls stay cheap.
+   */
+  private waitingFor(chatId: number): { taskId: number; plan: string; reworks: number; origin: string } | undefined {
+    const hit = this.planWaiting.get(chatId);
+    if (hit) return hit;
+    try {
+      const row = this.store.awaitingPlan(chatId);
+      if (!row) return undefined;
+      const waiting = {
+        taskId: row.id,
+        plan: row.plan_text ?? '',
+        reworks: row.plan_reworks ?? 0,
+        origin: row.plan_origin ?? row.prompt ?? '',
+      };
+      this.planWaiting.set(chatId, waiting);
+      return waiting;
+    } catch {
+      return undefined;
+    }
+  }
 
   submit(
     chatId: number,
@@ -102,6 +153,12 @@ export class TaskQueue {
       this.planTurns.add(taskId);
       this.planOrigin.set(taskId, prompt);
       this.planRounds.set(taskId, 0);
+      // Durable from birth: a restart mid-plan-turn must keep origin + rounds.
+      try {
+        this.store.setTaskPlanMeta(taskId, prompt, 0);
+      } catch {
+        // memory above already carries this tick; the meta lands on park
+      }
       if (this.pumping.has(chatId)) return 'planned';
       void this.pump(chatId);
       return 'planned';
@@ -113,7 +170,7 @@ export class TaskQueue {
 
   /** Plan flow: the owner approved a parked task — restore the real prompt and run it. */
   approvePlan(chatId: number): number | null {
-    const waiting = this.planWaiting.get(chatId);
+    const waiting = this.waitingFor(chatId);
     if (!waiting) return null;
     this.planWaiting.delete(chatId);
     // The parked row holds a plan-turn (or rework) prompt: put the original
@@ -132,9 +189,13 @@ export class TaskQueue {
    * the caller then runs the task anyway.
    */
   reworkPlan(chatId: number, comment: string): { rounds: number } | null {
-    const waiting = this.planWaiting.get(chatId);
+    const waiting = this.waitingFor(chatId);
     if (!waiting) return null;
-    if (waiting.reworks >= MAX_PLAN_REWORKS) {
+    // The DB is authoritative for spent rounds: after a restart the memory map
+    // is rebuilt from `plan_reworks`, but take the max so a hot tick never lags.
+    const spent = this.store.getTask(waiting.taskId)?.plan_reworks ?? waiting.reworks;
+    const reworks = Math.max(waiting.reworks, spent);
+    if (reworks >= MAX_PLAN_REWORKS) {
       // Out of rework rounds: run the task anyway, as specified.
       this.planWaiting.delete(chatId);
       const task = this.store.getTask(waiting.taskId);
@@ -144,7 +205,7 @@ export class TaskQueue {
       if (!this.pumping.has(chatId)) void this.pump(chatId);
       return null;
     }
-    const rounds = waiting.reworks + 1;
+    const rounds = reworks + 1;
     const task = this.store.getTask(waiting.taskId);
     const origin = waiting.origin !== '' ? waiting.origin : (task?.prompt ?? '');
     this.store.setTaskPlan(waiting.taskId, waiting.plan);
@@ -163,6 +224,12 @@ export class TaskQueue {
     this.planTurns.add(nextId);
     this.planOrigin.set(nextId, origin);
     this.planRounds.set(nextId, rounds);
+    // Durable from birth, like the first plan turn in submit().
+    try {
+      this.store.setTaskPlanMeta(nextId, origin, rounds);
+    } catch {
+      // memory above already carries this tick; the meta lands on park
+    }
     if (!this.pumping.has(chatId)) void this.pump(chatId);
     return { rounds };
   }
@@ -170,18 +237,27 @@ export class TaskQueue {
   /** Register a plan for button-driven approval, keyed by chat. */
   parkPlan(chatId: number, taskId: number, plan: string, reworks = 0, origin = ''): void {
     this.planWaiting.set(chatId, { taskId, plan, reworks, origin });
+    // The parked plan must survive a restart: origin + rework count live on
+    // the row (`awaiting_plan` + `plan_text` were already durable).
+    try {
+      this.store.setTaskPlanMeta(taskId, origin, reworks);
+    } catch {
+      // memory above already carries this tick
+    }
   }
 
   hasPlan(chatId: number): boolean {
-    return this.planWaiting.has(chatId);
+    return this.waitingFor(chatId) !== undefined;
   }
 
   async cancel(chatId: number): Promise<'approval' | 'task' | 'plan' | 'nothing'> {
-    if (resolveApproval(chatId, false)) return 'approval';
-    if (this.planWaiting.has(chatId)) {
-      const w = this.planWaiting.get(chatId);
+    // Only a LIVE waiter counts as an approval cancel; an orphaned row is
+    // settled as denied inside resolveApproval and cancel falls through.
+    if (resolveApproval(chatId, false) === 'live') return 'approval';
+    const waiting = this.waitingFor(chatId);
+    if (waiting) {
       this.planWaiting.delete(chatId);
-      if (w) this.store.setTaskStatus(w.taskId, 'cancelled');
+      this.store.setTaskStatus(waiting.taskId, 'cancelled');
       return 'plan';
     }
     const task = this.store.runningTask(chatId);
@@ -203,7 +279,7 @@ export class TaskQueue {
     return {
       running: this.pumping.has(chatId),
       pending: this.store.pendingCount(chatId),
-      plan: this.planWaiting.has(chatId),
+      plan: this.waitingFor(chatId) !== undefined,
     };
   }
 
@@ -288,8 +364,10 @@ export class TaskQueue {
       const reply = plan.text === '' ? '(пустой ответ)' : plan.text;
       // WAVE2/EXEC-BEGIN (plan turn completion: park the plan, ask to run)
       if (this.planTurns.delete(taskId)) {
-        const origin = this.planOrigin.get(taskId) ?? task.prompt;
-        const rounds = this.planRounds.get(taskId) ?? 0;
+        // Origin + rounds prefer memory, but the row carries them too — a
+        // restart between submit and completion must not reset the counter.
+        const origin = this.planOrigin.get(taskId) ?? task.plan_origin ?? task.prompt;
+        const rounds = this.planRounds.get(taskId) ?? task.plan_reworks ?? 0;
         this.planOrigin.delete(taskId);
         this.planRounds.delete(taskId);
         this.store.setTaskPlan(taskId, reply);

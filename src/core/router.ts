@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { type Bot } from 'grammy';
 import type { Config } from '../config.js';
 import { AGENT_IDS } from '../config.js';
-import { hasApproval, resolveApproval } from '../core/approvals.js';
+import { hasApproval, approvalReply, resolveApproval } from '../core/approvals.js';
 import {
   displayName,
   errorCode,
@@ -77,7 +77,18 @@ function ask(bot: Bot, deps: Deps, chatId: number, prompt: string, mode: 'ask' |
 // One pending-files map for every inbound kind (photo/document/audio/video), so the
 // shared handlers below cannot drift. The queue's `images: string[]` field carries
 // arbitrary absolute paths, so documents and images ride the same field.
-const pendingFiles = new Map<number, string[]>();
+const pendingFiles = new Map<number, PendingEntry>();
+
+/** Inbound files live on disk (`<workdir>/inbox`); this map only remembers them. */
+interface PendingEntry {
+  /** Each file carries its own receive time, so one append cannot extend another's TTL. */
+  files: { path: string; addedAt: number }[];
+  /** Owning chat: `takeImages(chatId)` only ever returns its own entry. */
+  chatId: number;
+}
+
+/** Inbox entries older than this are dropped on read (24 h, W2). */
+export const PENDING_FILES_TTL_MS = 24 * 3600 * 1000;
 
 /**
  * The live Bot, captured by `registerRouter`. `src/index.ts` builds Deps in two
@@ -91,10 +102,41 @@ function requireBot(): Bot {
   return liveBot;
 }
 
-function takeImages(chatId: number): string[] {
-  const files = pendingFiles.get(chatId) ?? [];
+export function takeImages(chatId: number): string[] {
+  sweepPendingFiles();
+  const entry = pendingFiles.get(chatId);
   pendingFiles.delete(chatId);
-  return files;
+  if (!entry || entry.chatId !== chatId) return [];
+  return entry.files.map((f) => f.path);
+}
+
+/**
+ * Remember inbound files for the next task. Exported so the W2 harness can
+ * prove TTL + ownership offline; `receiveInboundFile` delegates here.
+ */
+export function rememberInboundFiles(chatId: number, paths: string[], nowMs = Date.now()): void {
+  sweepPendingFiles(nowMs);
+  const prev = pendingFiles.get(chatId);
+  const kept = prev && prev.chatId === chatId ? prev.files : [];
+  pendingFiles.set(chatId, {
+    files: [...kept, ...paths.map((path) => ({ path, addedAt: nowMs }))],
+    chatId,
+  });
+}
+
+/**
+ * Drop inbox files older than 24 h. Files already live on disk — only the
+ * "attach to next task" memory is forgotten. Returns files dropped.
+ */
+export function sweepPendingFiles(nowMs = Date.now()): number {
+  let dropped = 0;
+  for (const [chatId, entry] of pendingFiles) {
+    const live = entry.files.filter((f) => nowMs - f.addedAt <= PENDING_FILES_TTL_MS);
+    dropped += entry.files.length - live.length;
+    if (live.length === 0) pendingFiles.delete(chatId);
+    else if (live.length !== entry.files.length) pendingFiles.set(chatId, { files: live, chatId });
+  }
+  return dropped;
 }
 
 /** `/find` — how many history hits to render at most, and how long a needle may be. */
@@ -123,9 +165,7 @@ async function receiveInboundFile(
     join(workdir, 'inbox'),
     inboxFilename(suggestedName),
   );
-  const list = pendingFiles.get(chatId) ?? [];
-  list.push(abs);
-  pendingFiles.set(chatId, list);
+  rememberInboundFiles(chatId, [abs]);
   deps.store.addMessage(chatId, 'user', `[file saved: ${abs}] ${caption}`.trim());
   const name = displayName(abs);
   await deps.io.notify(
@@ -482,10 +522,10 @@ export function registerRouter(bot: Bot, deps: Deps): void {
 
   bot.command('approve', (ctx) => {
     const chatId = ctx.chat.id;
-    if (!resolveApproval(chatId, true)) return deps.io.notify(chatId, 'Нечего подтверждать.');
-    // The decision is made: drop the button's nonces so it cannot be tapped again.
-    clear(chatId, SCOPE.approve);
-    return deps.io.notify(chatId, '✅ Разрешено.');
+    const r = resolveApproval(chatId, true);
+    // A dead button must not stay up: the row is settled either way.
+    if (r !== 'none') clear(chatId, SCOPE.approve);
+    return deps.io.notify(chatId, approvalReply(r, true));
   });
 
   bot.command('new', (ctx) => {
@@ -610,9 +650,9 @@ export function registerRouter(bot: Bot, deps: Deps): void {
     const text = ctx.message.text.trim();
     if (hasApproval(chatId)) {
       const ok = /^(да|yes|ага|ok|\+|approve)$/i.test(text);
-      resolveApproval(chatId, ok);
+      const r = resolveApproval(chatId, ok);
       clear(chatId, SCOPE.approve);
-      return deps.io.notify(chatId, ok ? '✅ Разрешено.' : 'Отклонено.');
+      return deps.io.notify(chatId, approvalReply(r, ok));
     }
     // WAVE2/EXEC (plan rework): plain text while a plan is parked = plan comment.
     if (await tryPlanRework(deps, chatId, text)) return;
@@ -636,8 +676,9 @@ export function createResponder(bot: Bot): Responder {
     askApproval: async (chatId, command) => {
       const { requestApproval } = await import('../core/approvals.js');
       // Register the pending promise BEFORE sending the keyboard, so a fast tap
-      // cannot race the approval into "нечего подтверждать".
-      const pending = requestApproval(chatId);
+      // cannot race the approval into "нечего подтверждать". The command lands
+      // in the durable row so the Mini App can show it after a restart (W2).
+      const pending = requestApproval(chatId, command);
       await bot.api.sendMessage(
         chatId,
         `Агент хочет выполнить:\n<pre>${escapeHtml(command)}</pre>\n\nНажми кнопку или /approve — разрешить, /cancel — отклонить`,
