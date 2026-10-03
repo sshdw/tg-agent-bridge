@@ -110,9 +110,10 @@ thing has no "mass" (opacity, color, background, content).
      .btn:active { transform: none; }
    }
    ```
-2. **Weak device (`performance_class` LOW)** — no parallax, blur ≤ 12px
-   (see `tokens.css` lite block), no springs (only `--ease-std`), no card
-   enter with transform. Opacity-only transitions, 150 ms.
+2. **Resolved performance mode** (`data-perf="full|reduced|lite"`, see
+   `performance.md` ladder) — `reduced`: no parallax, blur ≤ 16px nav /
+   ≤ 12px float, no sim stack (only `--ease-std`), no card enter with
+   transform. `lite`: opacity-only transitions, 150 ms.
 3. **During scroll** — no `enter` animations on feed items; scroll-linked
    effects only, and sparingly.
 4. **Long lists (> 20 rows)** — below-the-fold items never animate on appear.
