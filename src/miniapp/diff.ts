@@ -418,7 +418,7 @@ export function collectTaskFiles(
   const ranged = new Set<string>();
   if (before.sha !== after.sha && after.sha !== null && Date.now() < deadlineMs) {
     const rangeBase = before.sha ?? EMPTY_TREE_SHA;
-    const names = git(['diff', '--name-only', rangeBase, 'HEAD', '--'], cwd);
+    const names = git(['-c', 'core.quotePath=false', 'diff', '--name-only', rangeBase, 'HEAD', '--'], cwd);
     if (names !== null) {
       for (const ln of names.split('\n')) {
         const t = ln.trim();

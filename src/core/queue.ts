@@ -80,10 +80,11 @@ export class TaskQueue {
    * Plan-turn BEFORE snapshots (B1): taskId -> workdir + snapshot taken when
    * the plan turn ran. A parked plan's re-run must attribute against the
    * PRE-plan-turn tree, not the post-plan-turn one — otherwise the B1 dirt
-   * filter would eat the plan turn's own file writes. Single-use: consumed
-   * by the next `execute` of the same taskId (workdir must still match), lost
-   * on restart (then the approved run degrades to a fresh snapshot — same as
-   * before this filter existed, never worse).
+   * filter would eat the plan turn's own file writes. Two layers, single-use
+   * each: the in-memory map (fast path) and the durable `plan_diff_before`
+   * column written at park time (R2-MAJOR: survives a restart mid-approval;
+   * consumed + cleared by the next `execute` of the same taskId, workdir
+   * must still match in both layers).
    */
   private planSnaps = new Map<number, { workdir: string; snap: GitSnapshot }>();
   /** Set by plan.ts: deliver the approve/rework keyboard after a plan turn. */
@@ -242,6 +243,15 @@ export class TaskQueue {
     this.store.addMessage(chatId, 'user', comment);
     this.store.setTaskStatus(waiting.taskId, 'cancelled');
     this.planWaiting.delete(chatId);
+    // N3: the old (cancelled) taskId leaves no snapshot behind — its plan
+    // turn never runs again, so neither the memory stash nor the durable
+    // park-time snapshot may survive to confuse a future taskId reuse.
+    this.planSnaps.delete(waiting.taskId);
+    try {
+      this.store.setTaskPlanDiff(waiting.taskId, null);
+    } catch {
+      // row cleanup is best-effort; a stale NULL-equivalent never executes
+    }
     const s = getOrCreate(this.store, this.cfg, chatId);
     const nextId = this.store.createTask(
       chatId,
@@ -346,7 +356,9 @@ export class TaskQueue {
     try {
       const sx = getOrCreate(this.store, this.cfg, chatId);
       snapWorkdir = resolveWorkdir(this.cfg, chatId, sx.project);
-      snapBefore = snapshotGit(snapWorkdir);
+      // N1: the sig loop over a pathological dirty tree is bounded too —
+      // missing sigs degrade to conservative keep.
+      snapBefore = snapshotGit(snapWorkdir, Date.now() + DIFF_BUDGET_MS);
     } catch {
       snapBefore = null;
       snapWorkdir = '';
@@ -359,6 +371,33 @@ export class TaskQueue {
     this.planSnaps.delete(taskId);
     if (carried !== undefined && carried.workdir === snapWorkdir) {
       snapBefore = carried.snap;
+    } else if (snapWorkdir !== '') {
+      // R2-MAJOR: restart lost the in-memory stash — rehydrate the park-time
+      // snapshot persisted on the row (`plan_diff_before`). Same workdir gate:
+      // a snapshot from another workdir is never applied. Single-use: the
+      // row is cleared whether or not the payload validates.
+      try {
+        const saved = this.store.consumeTaskPlanDiff(taskId);
+        if (saved !== null) {
+          const parsed = JSON.parse(saved) as { workdir?: unknown; snap?: unknown };
+          const ps = parsed.snap as { sha?: unknown; porcelain?: unknown; sigs?: unknown } | undefined;
+          if (
+            parsed.workdir === snapWorkdir &&
+            ps !== undefined &&
+            (ps.sha === null || typeof ps.sha === 'string') &&
+            typeof ps.porcelain === 'string' &&
+            (ps.sigs === undefined || (typeof ps.sigs === 'object' && ps.sigs !== null))
+          ) {
+            snapBefore = {
+              sha: (ps.sha as string | null) ?? null,
+              porcelain: ps.porcelain as string,
+              sigs: (ps.sigs ?? {}) as Record<string, string>,
+            };
+          }
+        }
+      } catch {
+        // Corrupt row or DB hiccup: the fresh snapshot stands.
+      }
     }
     try {
       const s = getOrCreate(this.store, this.cfg, chatId);
@@ -427,9 +466,18 @@ export class TaskQueue {
         this.store.addMessage(chatId, 'assistant', reply);
         this.store.setTaskStatus(taskId, 'awaiting_plan');
         this.parkPlan(chatId, taskId, reply, rounds, origin);
-        // B1: stash this turn's BEFORE snapshot for the approved re-run.
+        // B1 (+R2-MAJOR durable layer): stash this turn's BEFORE snapshot
+        // for the approved re-run — in memory for the fast path, on the row
+        // (`plan_diff_before`) for a restart mid-approval. A dedicated
+        // column, not `setTaskGit` reuse: `files_summary` must never carry a
+        // foreign (sigs-shaped) JSON between park and finalize.
         if (snapBefore !== null && snapWorkdir !== '') {
           this.planSnaps.set(taskId, { workdir: snapWorkdir, snap: snapBefore });
+          try {
+            this.store.setTaskPlanDiff(taskId, JSON.stringify({ workdir: snapWorkdir, snap: snapBefore }));
+          } catch {
+            // The memory stash still carries the non-restart case.
+          }
         }
         await stream.finish(reply);
         const notify = this.planNotify;

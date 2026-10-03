@@ -114,7 +114,8 @@ const cfg = {
   miniUrl: '',
 };
 
-const store = new Store(join(base, 'w3.db'));
+const dbFile = join(base, 'w3.db');
+const store = new Store(dbFile);
 const queue = new TaskQueue(store, cfg, fakeIo());
 
 const useProject = (chatId, projectAbs, model = 'm-verify') => {
@@ -490,6 +491,55 @@ const drive = async (chatId, prompt, options = {}, timeoutMs = 60000) => {
   check('M6: expired budget marks all remaining truncated', files.length === 2 && files.every((f) => f.truncated === true && f.diff === null), JSON.stringify(files.map((f) => [f.path, f.truncated])));
 }
 
+// ---------------------------------------------------------------- R2-MAJOR: restart between park and approve
+{
+  const repo = join(base, 'r-r2');
+  initRepo(repo);
+  writeFileSync(join(repo, 'base.txt'), 'base\n');
+  sh(['add', '-A'], repo);
+  sh([...GIT_ENV, 'commit', '-qm', 'base'], repo);
+  useProject(125, repo);
+  const planImplMock = async (task) => {
+    if (task.prompt.startsWith('Plan first')) {
+      writeFileSync(join(task.workdir, 'planmade.txt'), 'from plan turn\n');
+      return { text: 'the plan', exitCode: 0, sessionId: '', costUsd: null };
+    }
+    writeFileSync(join(task.workdir, 'impl.txt'), 'from impl run\n');
+    return { text: 'impl done', exitCode: 0, sessionId: '', costUsd: null };
+  };
+  mockFn = planImplMock;
+  queue.submit(125, 'R2 restart mid-approval', 'code', [], { planOnly: true });
+  nextIdHint += 1;
+  const parked = await waitFor(() => store.awaitingPlan(125), 30000, 'plan parks (r2)');
+  check('R2: plan parked before restart', parked?.plan_text === 'the plan', String(parked?.plan_text));
+  const tid = parked?.id ?? -1;
+  // Full restart: close the DB, reopen on the same file, brand-new queue
+  // (in-memory planSnaps lost; restorePlans rebuilds only planWaiting).
+  store.close();
+  const store2 = new Store(dbFile);
+  const queue2 = new TaskQueue(store2, cfg, fakeIo());
+  check('R2: parked plan visible after reopen', store2.awaitingPlan(125)?.id === tid, String(store2.awaitingPlan(125)?.id));
+  const approved = queue2.approvePlan(125);
+  check('R2: approve after reopen returns task', approved === tid, String(approved));
+  const t0 = Date.now();
+  let fin;
+  for (;;) {
+    const c = store2.getTask(tid);
+    if (c && ['done', 'error', 'cancelled'].includes(c.status)) {
+      fin = c;
+      break;
+    }
+    if (Date.now() - t0 > 60000) throw new Error('timeout R2 impl run');
+    await tick(25);
+  }
+  check('R2: impl run done', fin.status === 'done', fin.status);
+  const paths = store2.taskFiles(fin.id).map((f) => f.path);
+  check('R2: plan-turn file attributed after restart', paths.includes('planmade.txt'), JSON.stringify(paths));
+  check('R2: impl-run file attributed after restart', paths.includes('impl.txt'), JSON.stringify(paths));
+  check('R2: park-time snapshot consumed (cleared)', store2.getTask(tid)?.plan_diff_before === null, String(store2.getTask(tid)?.plan_diff_before));
+  store2.close();
+}
+
 // ------------------------------------------------- snapshot timing: 500-file repo
 {
   const repo = join(base, 'rbig');
@@ -516,7 +566,8 @@ const drive = async (chatId, prompt, options = {}, timeoutMs = 60000) => {
   check('deps: only better-sqlite3 + grammy', JSON.stringify(deps) === '["better-sqlite3","grammy"]', deps.join(','));
 }
 
-store.close();
+// Both stores are closed by the R2 restart block (a mid-harness failure
+// exits via process.exit(1) without cleanup, like the other harnesses).
 
 console.log(`\n${n - failures.length}/${n} passed`);
 if (failures.length > 0) {

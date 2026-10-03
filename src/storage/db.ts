@@ -51,6 +51,12 @@ export interface TaskRow {
   git_base_sha: string | null;
   /** JSON `{changed_n, added, removed}` over ALL changed files (W3). NULL until collected. */
   files_summary: string | null;
+  /**
+   * Park-time W3 snapshot (R2-MAJOR): JSON `{workdir, snap}` stashed when a
+   * plan turn parks, rehydrated by the approved re-run after a restart.
+   * NULL except between park and consume; the finalize never reads it.
+   */
+  plan_diff_before: string | null;
   created_at: number;
   finished_at: number | null;
 }
@@ -254,6 +260,8 @@ export class Store {
     // Forward-compat: a hypothetical pre-W3 `task_files` without `binary`
     // (no real-world instance exists — production never had the table).
     this.addColumn('task_files', 'binary', 'INTEGER NOT NULL DEFAULT 0');
+    // v0.5 W3r2: park-time BEFORE snapshot for the approved re-run (R2-MAJOR).
+    this.addColumn('tasks', 'plan_diff_before', 'TEXT');
     // After every column exists (fresh and legacy DBs alike).
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_rev ON tasks (id, rev)');
   }
@@ -387,6 +395,32 @@ export class Store {
         'UPDATE tasks SET git_before = ?, git_after = ?, git_base_sha = ?, files_summary = ?, rev = rev + 1 WHERE id = ?',
       )
       .run(before, after, baseSha, summaryJson, id);
+  }
+
+  /**
+   * Park-time W3 snapshot (R2-MAJOR): stash `{workdir, snap}` JSON when a plan
+   * turn parks (NULL clears it). Read only via `consumeTaskPlanDiff`.
+   */
+  setTaskPlanDiff(id: number, json: string | null): void {
+    this.db.prepare('UPDATE tasks SET plan_diff_before = ? WHERE id = ?').run(json, id);
+  }
+
+  /**
+   * Single-use consume of the park-time snapshot: read + clear-to-NULL in one
+   * transaction, so a restarted approver and a stale in-memory stash can never
+   * double-apply it. Returns the raw JSON or NULL.
+   */
+  consumeTaskPlanDiff(id: number): string | null {
+    let out: string | null = null;
+    const tx = this.db.transaction(() => {
+      const row = this.db.prepare('SELECT plan_diff_before AS v FROM tasks WHERE id = ?').get(id) as {
+        v: string | null;
+      } | undefined;
+      out = row?.v ?? null;
+      this.db.prepare('UPDATE tasks SET plan_diff_before = NULL WHERE id = ?').run(id);
+    });
+    tx();
+    return out;
   }
 
   /**
