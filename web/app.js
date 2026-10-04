@@ -5,9 +5,12 @@
  */
 
 import { createApiClient, createPoller, downloadUrl } from './lib/api.js';
+import { toggleInList, togglePreset, validateDraft } from './lib/draft.js';
 import { autoPerf, PERF_CHOICE_KEY } from './lib/perf.js';
 import { readThemeTokensPure } from './lib/theme.js';
+import { renderConfirm } from './screens/confirm.js';
 import { formatElapsed, renderHome } from './screens/home.js';
+import { renderMore } from './screens/more.js';
 import { renderTaskDetails, renderTasks } from './screens/tasks.js';
 import {
   copyPath,
@@ -36,6 +39,20 @@ const state = {
   tsub: null,
   files: { dir: '.', abs: '', entries: [], total: 0 },
   fview: { kind: 'explorer' },
+  /* W7 More + confirm state. Draft text lives here (never in localStorage —
+   * a draft is single-open server-side; a new POST expires the old one). */
+  settings: null,
+  agents: null,
+  models: null,
+  modelsCached: false,
+  projects: null,
+  health: null,
+  skills: [],
+  skillsAuto: false,
+  perfChoice: 'auto',
+  moreUI: { openPicker: null, healthOpen: null },
+  composerText: '',
+  confirm: null,
 };
 
 function el(id) {
@@ -105,6 +122,19 @@ function applyPerf(mode) {
   if (mode === 'full' || mode === 'reduced' || mode === 'lite') {
     doc.documentElement.dataset.perf = mode;
   }
+}
+
+/**
+ * W7 Performance switch: synchronous dataset.perf flip, no reload.
+ * 'auto' re-resolves in the background; explicit full/lite apply at once.
+ * Persists to CloudStorage primary + localStorage fallback (savePerfChoice).
+ */
+function applyPerfChoice(value) {
+  const v = value === 'full' || value === 'lite' ? value : 'auto';
+  state.perfChoice = v;
+  savePerfChoice(v);
+  if (v === 'full' || v === 'lite') applyPerf(v);
+  else void autoPerf().then(applyPerf);
 }
 
 function resolvePerfChoice() {
@@ -297,6 +327,11 @@ function doDownload(rel) {
 /* ---------------- drill-in → back (Telegram BackButton) ---------------- */
 
 function goBack() {
+  if (state.confirm) {
+    state.composerText = readConfirmText();
+    closeConfirm();
+    return;
+  }
   if (state.tab === 'files') {
     if (state.fview.kind === 'preview' || state.fview.kind === 'diff') {
       state.fview = { kind: 'explorer' };
@@ -323,6 +358,7 @@ function goBack() {
 }
 
 function needBack() {
+  if (state.confirm) return true;
   if (state.tab === 'files') return state.fview.kind !== 'explorer' || state.files.dir !== '.';
   if (state.tab === 'tasks') return state.detailId !== null;
   return false;
@@ -338,15 +374,187 @@ function syncBack() {
   }
 }
 
-function stubMore() {
+/* ---------------- W7 More tab + confirmation card ---------------- */
+
+function moreViewModel() {
+  const pickers =
+    state.agents || state.models || state.projects
+      ? {
+          agent: (state.agents ?? []).map((a) => ({ value: a, label: a })),
+          model: (state.models ?? []).map((m) => ({ value: m.id, label: m.label })),
+          project: (state.projects ?? []).map((p) => ({ value: p.dir, label: p.label })),
+          modelsCached: state.modelsCached,
+        }
+      : null;
   return {
-    html:
-      `<section class="empty-state" aria-label="More coming soon">` +
-      `<div class="h-title">More</div>` +
-      `<p class="h-caption">Settings, skills and performance land in W7.</p>` +
-      `</section>`,
-    float: '',
+    settings: state.settings,
+    pickers,
+    health: state.health,
+    skills: state.skills,
+    skillsAuto: state.skillsAuto,
+    perf: state.perfChoice,
+    openPicker: state.moreUI.openPicker,
+    healthOpen: state.moreUI.healthOpen,
   };
+}
+
+function paintMore() {
+  paint(renderMore(moreViewModel()));
+}
+
+function paintConfirm() {
+  if (!state.confirm) return;
+  const c = state.confirm;
+  paint(
+    renderConfirm({
+      text: c.text,
+      mode: c.mode,
+      preset: c.preset,
+      agent: state.settings?.agent ?? '',
+      model: state.settings?.model ?? '',
+      project: state.settings?.project ?? '',
+      skills: c.skills,
+      pinned: state.skills.filter((s) => s.pinned).map((s) => s.name),
+      attachN: 0,
+      busy: c.busy,
+      leaving: c.leaving,
+    }),
+  );
+}
+
+function pinnedNames() {
+  return state.skills.filter((s) => s.pinned).map((s) => s.name);
+}
+
+async function loadSettings() {
+  try {
+    const r = await client.settings();
+    if (r.status === 200 && r.body) state.settings = r.body;
+  } catch {
+    /* keep the stale view */
+  }
+}
+
+async function loadSkills() {
+  try {
+    const r = await client.skills();
+    if (r.status === 200 && r.body) {
+      state.skills = Array.isArray(r.body.skills) ? r.body.skills : [];
+      state.skillsAuto = r.body.auto === true;
+    }
+  } catch {
+    /* keep the stale view */
+  }
+}
+
+/** More tab data: one fetch round per visit, no poller (github minimal rule). */
+async function loadMore() {
+  await loadSettings();
+  try {
+    const r = await client.pickersAgents();
+    if (r.status === 200 && r.body && Array.isArray(r.body.agents)) state.agents = r.body.agents;
+  } catch {
+    /* keep stale */
+  }
+  try {
+    const r = await client.pickersModels();
+    if (r.status === 200 && r.body && Array.isArray(r.body.models)) {
+      state.models = r.body.models;
+      state.modelsCached = r.body.cached === true;
+    }
+  } catch {
+    /* keep stale */
+  }
+  try {
+    const r = await client.pickersProjects();
+    if (r.status === 200 && r.body && Array.isArray(r.body.projects)) {
+      state.projects = r.body.projects;
+    }
+  } catch {
+    /* keep stale */
+  }
+  try {
+    const r = await client.health();
+    if (r.status === 200 && r.body) state.health = r.body;
+  } catch {
+    /* keep stale */
+  }
+  await loadSkills();
+  if (state.tab === 'more' && !state.confirm) paintMore();
+}
+
+/** Home → confirmation card. Text restores the preserved composer buffer. */
+function openConfirm() {
+  state.confirm = {
+    text: state.composerText,
+    mode: 'ask',
+    preset: '',
+    skills: pinnedNames(),
+    busy: false,
+    leaving: false,
+  };
+  paintConfirm();
+  void (async () => {
+    await loadSettings();
+    await loadSkills();
+    if (state.confirm) {
+      state.confirm.skills = state.confirm.skills.length === 0 ? pinnedNames() : state.confirm.skills;
+      paintConfirm();
+    }
+  })();
+}
+
+function readConfirmText() {
+  try {
+    const input = doc ? doc.querySelector('[data-confirm-input]') : null;
+    if (input && typeof input.value === 'string') return input.value;
+  } catch {
+    /* no DOM */
+  }
+  return state.confirm ? state.confirm.text : '';
+}
+
+/** Edit/dismiss: play the 300 ms --ease-in exit, then reveal the tab. */
+function closeConfirm(after) {
+  if (!state.confirm) {
+    if (state.tab === 'more') paintMore();
+    else if (state.tab === 'tasks') paintTasks();
+    else if (state.tab === 'files') paintFiles();
+    else paint(renderHome({ running: state.current?.running ?? null, recent: state.recent }));
+    return;
+  }
+  state.confirm.leaving = true;
+  paintConfirm();
+  setTimeout(() => {
+    state.confirm = null;
+    if (after === 'home') switchTab('home');
+    else if (state.tab === 'more') paintMore();
+    else if (state.tab === 'tasks') paintTasks();
+    else if (state.tab === 'files') paintFiles();
+    else paint(renderHome({ running: state.current?.running ?? null, recent: state.recent }));
+  }, 300);
+}
+
+function openLink(url) {
+  const u = String(url ?? '');
+  if (!/^https:\/\//.test(u)) return 'none';
+  try {
+    if (tg?.openLink) {
+      tg.openLink(u);
+      return 'openLink';
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(u, '_blank', 'noopener');
+      return 'window';
+    }
+  } catch {
+    /* no transport */
+  }
+  return 'none';
 }
 
 function moveIndicator() {
@@ -374,6 +582,10 @@ function paint(view) {
 
 function switchTab(tab) {
   if (!TABS.includes(tab)) return;
+  if (state.confirm) {
+    state.composerText = readConfirmText();
+    state.confirm = null;
+  }
   state.tab = tab;
   if (tab !== 'tasks') {
     state.detailId = null;
@@ -391,7 +603,10 @@ function switchTab(tab) {
   else if (tab === 'files') {
     paintFiles();
     if (state.files.abs === '') void loadFiles(state.files.dir);
-  } else paint(stubMore());
+  } else {
+    paintMore();
+    void loadMore();
+  }
   try {
     tg?.HapticFeedback?.selectionChanged();
   } catch {
@@ -423,22 +638,42 @@ function tickElapsed() {
 
 /* ---------------- actions: stop (confirm) / retry / continue / details ---------------- */
 
-function confirmStop() {
+function showConfirmDialog(text) {
   return new Promise((resolve) => {
     try {
       if (tg?.showConfirm) {
-        tg.showConfirm('Stop this task?', (ok) => resolve(ok === true));
+        tg.showConfirm(text, (ok) => resolve(ok === true));
         return;
       }
     } catch {
       /* fall through to window.confirm */
     }
     try {
-      resolve(window.confirm('Stop this task?') === true);
+      resolve(window.confirm(text) === true);
     } catch {
       resolve(false);
     }
   });
+}
+
+function confirmStop() {
+  return showConfirmDialog('Stop this task?');
+}
+
+function hapticSelect() {
+  try {
+    tg?.HapticFeedback?.selectionChanged();
+  } catch {
+    /* haptics optional */
+  }
+}
+
+function hapticError() {
+  try {
+    tg?.HapticFeedback?.notificationOccurred('error');
+  } catch {
+    /* optional */
+  }
 }
 
 async function refreshAll() {
@@ -466,7 +701,221 @@ async function refreshAll() {
   }
 }
 
+/* ---------------- W7 actions: confirm card, More, skills ---------------- */
+
+/**
+ * Reset session — the Mini App equivalent of chat /new
+ * (src/core/router.ts:531: dropAgentSession + clearMessages).
+ * PUT /api/settings has no "reset" field, but switching agent or project
+ * drops the provider-side session server-side (src/miniapp/api.ts:786-788),
+ * so reset = an agent round-trip: PUT {agent: other} then PUT {agent:
+ * current}. Both flips drop agent_session_id; the visible session is
+ * unchanged afterwards and the next task starts fresh. The agent pair comes
+ * from the loaded pickers (never hardcoded). Chat-history clearing
+ * (store.clearMessages) has no API equivalent — provider session only.
+ */
+async function resetSession() {
+  if (!(await showConfirmDialog('Reset session? The next task starts fresh.'))) return;
+  try {
+    if (!state.agents) {
+      const r = await client.pickersAgents();
+      if (r.status === 200 && r.body && Array.isArray(r.body.agents)) state.agents = r.body.agents;
+    }
+    const cur = state.settings?.agent ?? (state.agents ?? [])[0] ?? '';
+    const other = (state.agents ?? []).find((a) => a !== cur) ?? (cur === 'mock' ? 'opencode' : 'mock');
+    await client.updateSettings({ agent: other });
+    await client.updateSettings({ agent: cur });
+    await loadSettings();
+  } catch {
+    /* refresh shows the truth */
+  }
+  if (state.tab === 'more' && !state.confirm) paintMore();
+}
+
+async function runConfirmCard() {
+  const c = state.confirm;
+  if (!c || c.busy) return;
+  const text = readConfirmText();
+  const v = validateDraft({ text, mode: c.mode, preset: c.preset, skills: c.skills });
+  if (!v.ok || !v.payload) {
+    hapticError();
+    return;
+  }
+  c.busy = true;
+  c.text = text;
+  paintConfirm();
+  try {
+    // Single-open semantics are server-side: this POST expires any older
+    // open draft for the chat (api.ts createDraft), the client keeps none.
+    const d = await client.postDraft(v.payload.prompt, v.payload.mode, v.payload.skills);
+    const id = d.body && d.body.draft ? Number(d.body.draft.id) : NaN;
+    if (d.status !== 200 || !Number.isInteger(id)) {
+      c.busy = false;
+      paintConfirm();
+      return;
+    }
+    const r = await client.confirmDraft(id);
+    const taskId = r.body ? Number(r.body.task_id) : NaN;
+    if (r.status !== 200 || !Number.isInteger(taskId)) {
+      c.busy = false;
+      paintConfirm();
+      return;
+    }
+    state.composerText = '';
+    state.confirm = null;
+    await refreshAll();
+    switchTab('home');
+  } catch {
+    c.busy = false;
+    if (state.confirm) paintConfirm();
+  }
+}
+
+/** W7 actions. Returns true when the action was handled here. */
+async function onW7Action(action, ds = {}) {
+  if (action === 'noop') return true;
+  if (action === 'new-task') {
+    openConfirm();
+    return true;
+  }
+  /* Confirm-card actions need an open card; More actions work any time. */
+  const CONFIRM_ACTIONS = ['preset', 'draft-mode', 'draft-skill', 'draft-run', 'draft-edit'];
+  const MORE_ACTIONS = ['picker-open', 'setting-pick', 'auto-approve', 'perf', 'health-reason', 'health-refresh', 'gh-open', 'skills-pin', 'skills-auto', 'reset-session'];
+  if (CONFIRM_ACTIONS.includes(action) && !state.confirm) return false;
+  if (!CONFIRM_ACTIONS.includes(action) && !MORE_ACTIONS.includes(action)) return false;
+  if (action === 'preset') {
+    if (state.confirm) {
+      state.confirm.text = readConfirmText();
+      state.confirm.preset = togglePreset(state.confirm.preset, ds.preset);
+      if (state.confirm.preset !== '') state.confirm.mode = 'code';
+      hapticSelect();
+      paintConfirm();
+    }
+    return true;
+  }
+  if (action === 'draft-mode') {
+    if (state.confirm) {
+      state.confirm.text = readConfirmText();
+      const m = String(ds.mode ?? '');
+      if (m === 'ask' || m === 'code' || m === 'plan') state.confirm.mode = m;
+      state.confirm.preset = '';
+      hapticSelect();
+      paintConfirm();
+    }
+    return true;
+  }
+  if (action === 'draft-skill') {
+    if (state.confirm) {
+      state.confirm.text = readConfirmText();
+      state.confirm.skills = toggleInList(state.confirm.skills, ds.skill);
+      hapticSelect();
+      paintConfirm();
+    }
+    return true;
+  }
+  if (action === 'draft-run') {
+    await runConfirmCard();
+    return true;
+  }
+  if (action === 'draft-edit') {
+    if (state.confirm && !state.confirm.busy) {
+      state.composerText = readConfirmText();
+      closeConfirm();
+    }
+    return true;
+  }
+  if (action === 'picker-open') {
+    state.moreUI.openPicker = state.moreUI.openPicker === ds.picker ? null : ds.picker;
+    hapticSelect();
+    paintMore();
+    return true;
+  }
+  if (action === 'setting-pick') {
+    const kind = String(ds.kind ?? '');
+    const value = ds.value ?? '';
+    if (kind === 'agent' || kind === 'model' || kind === 'project') {
+      try {
+        // Agent/project switches drop agent_session_id server-side
+        // (chat parity with the telegram pickers); the badge below
+        // re-renders from the PUT response via loadSettings.
+        await client.updateSettings({ [kind]: value });
+        await loadSettings();
+      } catch {
+        /* refresh shows the truth */
+      }
+      state.moreUI.openPicker = null;
+      hapticSelect();
+      if (state.tab === 'more' && !state.confirm) paintMore();
+    }
+    return true;
+  }
+  if (action === 'auto-approve') {
+    try {
+      await client.updateSettings({ auto_approve: !(state.settings?.auto_approve === true) });
+      await loadSettings();
+    } catch {
+      /* refresh shows the truth */
+    }
+    hapticSelect();
+    if (state.tab === 'more' && !state.confirm) paintMore();
+    return true;
+  }
+  if (action === 'perf') {
+    applyPerfChoice(String(ds.value ?? 'auto'));
+    hapticSelect();
+    if (state.tab === 'more' && !state.confirm) paintMore();
+    return true;
+  }
+  if (action === 'health-reason') {
+    const s = String(ds.signal ?? '');
+    state.moreUI.healthOpen = state.moreUI.healthOpen === s ? null : s;
+    hapticSelect();
+    paintMore();
+    return true;
+  }
+  if (action === 'health-refresh') {
+    await loadMore();
+    return true;
+  }
+  if (action === 'gh-open') {
+    openLink(ds.url);
+    return true;
+  }
+  if (action === 'skills-pin') {
+    const name = String(ds.skill ?? '');
+    if (name !== '') {
+      const pins = toggleInList(pinnedNames(), name);
+      try {
+        await client.updateSkills(pins, state.skillsAuto);
+        await loadSkills();
+      } catch {
+        /* refresh shows the truth */
+      }
+      hapticSelect();
+      if (state.tab === 'more' && !state.confirm) paintMore();
+    }
+    return true;
+  }
+  if (action === 'skills-auto') {
+    try {
+      await client.updateSkills(pinnedNames(), !state.skillsAuto);
+      await loadSkills();
+    } catch {
+      /* refresh shows the truth */
+    }
+    hapticSelect();
+    if (state.tab === 'more' && !state.confirm) paintMore();
+    return true;
+  }
+  if (action === 'reset-session') {
+    await resetSession();
+    return true;
+  }
+  return false;
+}
+
 async function onAction(action, id, ds = {}) {
+  if (await onW7Action(action, ds)) return;
   if (action === 'details') {
     state.detailId = id;
     state.detailRev = undefined;
@@ -611,6 +1060,7 @@ function boot() {
   tg?.onEvent?.('backButtonClicked', goBack);
 
   resolvePerfChoice();
+  state.perfChoice = loadPerfChoice();
 
   if (doc) {
     doc.querySelectorAll('.nav-item').forEach((b) => {
@@ -683,4 +1133,4 @@ function boot() {
 
 if (typeof document !== 'undefined' && typeof window !== 'undefined') boot();
 
-export { boot, switchTab, onAction, goBack, needBack, readThemeTokens, syncGeometry, loadPerfChoice, savePerfChoice };
+export { boot, switchTab, onAction, goBack, needBack, readThemeTokens, syncGeometry, loadPerfChoice, savePerfChoice, applyPerfChoice };
