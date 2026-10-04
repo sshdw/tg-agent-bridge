@@ -346,6 +346,25 @@ g('AC8: no new runtime dependency');
   assert(JSON.stringify(Object.keys(pkg.dependencies).sort()) === '["better-sqlite3","grammy"]', 'dependencies are exactly better-sqlite3 + grammy');
 }
 
+g('static-public (WebView boot fix): static WITHOUT guard, /api/* guarded');
+{
+  const pubRoot = await get('/');
+  assert(pubRoot.status === 200, `unauth GET / -> 200 (got ${pubRoot.status})`);
+  assert(pubRoot.ctype.includes('text/html'), `unauth GET / served as text/html (${pubRoot.ctype})`);
+  const pubHtml = await (await fetch(base + '/')).text();
+  assert(pubHtml.includes('<h1'), 'unauth GET / shell carries an <h1');
+  const pubJs = await get('/app.js');
+  assert(pubJs.status === 200, `unauth GET /app.js -> 200 (got ${pubJs.status})`);
+  const apiRecent = await get('/api/tasks/recent');
+  assert(apiRecent.status === 401 && apiRecent.body?.error === 'E_AUTH', 'unauth GET /api/tasks/recent -> 401 E_AUTH (guard intact)');
+  // Unknown /api/* still hits the guard first (W4 posture: 404 AFTER guard),
+  // so without a header it is a 401, never a data oracle.
+  const apiNope = await get('/api/nonexistent');
+  assert(apiNope.status === 401 && apiNope.body?.error === 'E_AUTH', 'unauth GET /api/nonexistent -> 401 (guard before dispatch)');
+  const staticNope = await get('/nope-xyz-public');
+  assert(staticNope.status === 404 && staticNope.body?.error === 'E_NOT_FOUND', 'unauth GET /nope-xyz-public -> 404 JSON (public static tree)');
+}
+
 g('routing: 404 / 405 / static / bind / close');
 {
   const nope = await get('/nope-xyz', freshValid());
