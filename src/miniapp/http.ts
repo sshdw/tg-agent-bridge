@@ -12,8 +12,11 @@ import type { ApiEnv, ApiResult } from './api.js';
  * W1 foundation: node:http listener + Telegram initData HMAC guard (D8) +
  * static placeholder serving. No new runtime deps.
  *
- * Auth rule (PLAN-V05 §5): every request except `GET /health` must carry
- * `X-Telegram-Init-Data`. The user id is taken ONLY from the verified `user`
+ * Auth rule (corrected — WebView boot fix): static app code is inherently
+ * public (the Telegram WebView loads the shell via plain navigation GET with
+ * no custom headers), so every non-`/api/*` path is served WITHOUT a guard.
+ * ONLY `/api/*` carries per-user data and requires `X-Telegram-Init-Data`.
+ * The user id is taken ONLY from the verified `user`
  * field inside that header — never from the body or the URL query.
  */
 
@@ -25,8 +28,9 @@ export interface MiniServerDeps {
   log?: (line: string) => void;
   /**
    * W4: live API environment (Store + TaskQueue + Config + boot facts). Absent →
-   * every `/api/*` path 404s AFTER the guard (the W1 posture: auth is proven,
-   * the route simply does not exist in this build).
+   * every `/api/*` path 404s AFTER the guard (the corrected posture: static is
+   * public, `/api/*` is guarded — auth is proven, the route simply does not
+   * exist in this build).
    */
   api?: ApiEnv;
 }
@@ -327,16 +331,18 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
           json(res, 200, { ok: true, version: VERSION, sha: buildSha });
           return;
         }
-        // Guard before routing: everything except GET /health above requires
-        // a verified initData, even paths that turn out not to exist (AC2).
-        const rawHeader = req.headers['x-telegram-init-data'];
-        const raw = Array.isArray(rawHeader) ? (rawHeader[0] ?? '') : (rawHeader ?? '');
-        const verdict = verifyInitData(raw, deps.botToken, deps.allowedChatIds);
-        if (!verdict.ok) {
-          json(res, verdict.status, { error: verdict.error });
-          return;
-        }
+        // Corrected posture (WebView boot fix): static app code is inherently
+        // public, so non-`/api/*` paths skip the guard and fall through to
+        // serveStatic below. ONLY `/api/*` requires a verified initData —
+        // unknown `/api/*` paths still 404 AFTER the guard (no data oracle).
         if (path === '/api/health' || path.startsWith('/api/')) {
+          const rawHeader = req.headers['x-telegram-init-data'];
+          const raw = Array.isArray(rawHeader) ? (rawHeader[0] ?? '') : (rawHeader ?? '');
+          const verdict = verifyInitData(raw, deps.botToken, deps.allowedChatIds);
+          if (!verdict.ok) {
+            json(res, verdict.status, { error: verdict.error });
+            return;
+          }
           void serveApi(verdict.userId, method, path, query, req, res);
           return;
         }
