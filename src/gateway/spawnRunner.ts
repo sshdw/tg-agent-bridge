@@ -271,8 +271,8 @@ export function telegramify(prompt: string): string {
  * Used as the fallback path when the provider cannot resume a real session.
  *
  * Every prompt this produces originates from Telegram, so the marker and the
- * phone-friendly system line are applied here: providers that only call
- * `composePrompt` (cursor, cline, hermes) then get the same decoration as opencode's
+ * phone-friendly system line are applied here: every CLI provider calling
+ * `composePrompt` then gets the same decoration as opencode's
  * resume path, without each provider re-implementing it.
  */
 export function composePrompt(task: AgentTask, maxChars = 12000): string {

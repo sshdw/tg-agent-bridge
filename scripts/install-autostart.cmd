@@ -3,6 +3,8 @@ rem TG Agent Bridge autostart installer (Windows only). ASCII-only on purpose.
 rem Creates a per-user logon task "tg-agent-bridge" that runs this checkout:
 rem   <repo>\scripts\run-bridge.cmd
 rem with restart-on-failure (3 tries, 1 minute apart). No admin needed.
+rem The bot and the Mini App HTTP server are ONE process (src/index.ts), so a
+rem bot restart brings the Mini App back too - no extra steps for the Mini App.
 rem Usage: double-click this file (or run it from cmd). Undo with:
 rem   schtasks /delete /tn "tg-agent-bridge" /f
 setlocal EnableExtensions

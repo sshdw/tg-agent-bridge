@@ -85,8 +85,11 @@ export function createApiClient({ base = '', getInitData = () => '', fetchImpl =
     health: () => req('/api/health'),
     skills: () => req('/api/skills'),
     updateSkills: (pins, auto) => req('/api/skills', { method: 'PUT', body: { pins, auto } }),
-    postDraft: (prompt, mode, skills) =>
-      req('/api/drafts', { method: 'POST', body: { prompt, mode, skills } }),
+    postDraft: (prompt, mode, skills, preset) =>
+      req('/api/drafts', {
+        method: 'POST',
+        body: { prompt, mode, skills, ...(typeof preset === 'string' && preset !== '' ? { preset } : {}) },
+      }),
     confirmDraft: (id) => req(`/api/drafts/${String(id)}/confirm`, { method: 'POST', body: {} }),
     discardDraft: (id) => req(`/api/drafts/${String(id)}/discard`, { method: 'POST', body: {} }),
   };

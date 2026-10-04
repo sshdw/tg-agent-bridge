@@ -2,13 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import type { AgentId } from './gateway/types.js';
 
-export const AGENT_IDS: readonly AgentId[] = [
-  'opencode',
-  'cursor',
-  'cline',
-  'hermes',
-  'mock',
-];
+export const AGENT_IDS: readonly AgentId[] = ['opencode', 'mock'];
 
 export interface Config {
   botToken: string;

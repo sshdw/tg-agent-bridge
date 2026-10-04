@@ -1,3 +1,6 @@
+/** FROZEN — see PLAN-V05 W8 */
+// (W8 cut wave: this file is byte-frozen as the Telegram HTML fallback.
+// Do not edit contents; Rich Messages own rendering, this owns fallback.)
 /**
  * Markdown -> Telegram HTML converter.
  *

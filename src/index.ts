@@ -10,15 +10,11 @@ import { createResponder } from './core/router.js';
 import { registerPlanFlow } from './core/plan.js';
 import { cachedModels } from './gateway/models.js';
 import { register } from './gateway/registry.js';
-import { ClineProvider } from './providers/cline.js';
-import { CursorProvider } from './providers/cursor.js';
-import { HermesProvider } from './providers/hermes.js';
 import { MockProvider } from './providers/mock.js';
 import { OpenCodeProvider } from './providers/opencode.js';
 import { Store } from './storage/db.js';
 import { createBot } from './telegram/bot.js';
 import { probeRichSupport } from './telegram/rich.js';
-import { startCiPoller } from './github/ciPoller.js';
 import { acquirePidLock, createMiniServer, isPortBusy, releasePidLock, startHeartbeat, wireMenuButton } from './miniapp/http.js';
 import { log } from './log.js';
 import { VERSION } from './version.js';
@@ -57,9 +53,6 @@ async function main(): Promise<void> {
   mkdirSync(cfg.workRoot, { recursive: true });
   const store = new Store(cfg.dbPath);
   register(new OpenCodeProvider(cfg.opencodeBin));
-  register(new CursorProvider(cfg.cursorBin));
-  register(new ClineProvider(cfg.clineBin));
-  register(new HermesProvider(cfg.hermesBaseUrl, cfg.hermesApiKey));
   register(new MockProvider());
 
   // Deps is filled in two steps: handlers read deps.queue/deps.io lazily at call time.
@@ -112,7 +105,8 @@ async function main(): Promise<void> {
     )
     .catch(() => undefined);
 
-  startCiPoller(cfg, store, deps.io);
+  // W8: CI poller deleted with src/github/ (cut list §9#5) — GitHub minimal
+  // is browser links from the Mini App, never polling.
 
   // Mini App HTTP layer (W1): heartbeat so the client can show
   // "бот недоступен" when this process dies, menu-button wiring (D1, bounded

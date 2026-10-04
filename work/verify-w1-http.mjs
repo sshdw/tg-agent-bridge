@@ -356,7 +356,7 @@ g('routing: 404 / 405 / static / bind / close');
   assert(idx.status === 200, `GET / -> 200 (got ${idx.status})`);
   assert(idx.ctype.includes('text/html'), `placeholder served as text/html (${idx.ctype})`);
   const html = await (await fetch(base + '/', { headers: { 'X-Telegram-Init-Data': freshValid() } })).text();
-  assert(html.includes('<h1>'), 'placeholder carries a single <h1>');
+  assert(html.includes('<h1'), 'shell carries an <h1 (real Mini App shell, W5+)');
   const src = readFileSync(join(ROOT, 'src', 'miniapp', 'http.ts'), 'utf8');
   assert(src.includes('127.0.0.1'), 'listener binds 127.0.0.1 explicitly');
   assert(!src.includes('0.0.0.0'), 'listener never binds 0.0.0.0');

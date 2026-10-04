@@ -8,6 +8,8 @@ import { listDir, MAX_OUTBOUND_BYTES, resolveOutboundDir, resolveOutboundFile } 
 import { resolveWorkdir } from '../core/permissions.js';
 import { listProjects } from '../core/projects.js';
 import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
+import { applyPreset, isPreset } from '../core/presets.js';
+import type { PresetName } from '../core/presets.js';
 import { listSkills, parseSkillNames, SKILL_NAME_MAX, SKILL_NAME_RE } from '../core/queue.js';
 import type { TaskQueue } from '../core/queue.js';
 import { cachedModels, modelLabel } from '../gateway/models.js';
@@ -190,17 +192,25 @@ function parseMode(v: unknown): WireMode | null {
 
 const TASK_MODE: Record<WireMode, TaskMode> = { ask: 'ask', code: 'code', plan: 'code' };
 
-/** Shared `mode` + `skills` validation for `POST /api/drafts` and `/api/tasks`. */
-function parseRunBody(body: unknown): { prompt: string; mode: WireMode; skills: string[] } | ApiResult {
-  const shape = bodyShapeError(body, ['prompt', 'mode', 'skills']);
+/** Shared `mode` + `skills` + `preset` validation for `POST /api/drafts` and `/api/tasks`. */
+function parseRunBody(body: unknown): { prompt: string; mode: WireMode; skills: string[]; preset: PresetName | '' } | ApiResult {
+  const shape = bodyShapeError(body, ['prompt', 'mode', 'skills', 'preset']);
   if (shape !== null) return shape;
-  const b = (body ?? {}) as { prompt?: unknown; mode?: unknown; skills?: unknown };
+  const b = (body ?? {}) as { prompt?: unknown; mode?: unknown; skills?: unknown; preset?: unknown };
   if (!validPrompt(b.prompt)) return err(400, 'E_BAD_ARG');
   const mode = b.mode === undefined ? 'ask' : parseMode(b.mode);
   if (mode === null) return err(400, 'E_BAD_ARG');
   const skills = parseSkills(b.skills);
   if (skills === null) return err(400, 'E_BAD_ARG');
-  return { prompt: b.prompt, mode, skills };
+  // W8 F1 preset channel: the client sends the preset NAME only (never body
+  // text); the server substitutes the role prefix via applyPreset before the
+  // run. Unknown names are refused like any other bad field.
+  let preset: PresetName | '' = '';
+  if (b.preset !== undefined && b.preset !== '') {
+    if (typeof b.preset !== 'string' || !isPreset(b.preset)) return err(400, 'E_BAD_ARG');
+    preset = b.preset;
+  }
+  return { prompt: b.prompt, mode, skills, preset };
 }
 
 function parseSkills(v: unknown): string[] | null {
@@ -367,17 +377,23 @@ function postDrafts(env: ApiEnv, chatId: number, body: unknown): ApiResult {
   const parsed = parseRunBody(body);
   if ('status' in parsed) return parsed;
   const s = getOrCreate(env.store, env.cfg, chatId);
+  // W8 F1: a preset forces mode 'code' (every preset is a /code variant) and
+  // the role prefix is baked into the STORED prompt — `confirm` then runs
+  // exactly what the owner saw on the card, and no schema change is needed
+  // (the draft row carries no preset column; the name has done its job here).
+  const prompt = parsed.preset !== '' ? applyPreset(parsed.preset, parsed.prompt) : parsed.prompt;
+  const mode = parsed.preset !== '' ? 'code' : parsed.mode;
   // The card snapshots the run context AND the plan intent: `confirm` must run
   // what the owner saw, even if `PUT /api/settings` moved the session on (M2).
   const id = env.store.createDraft(
     chatId,
-    parsed.prompt,
-    parsed.mode,
+    prompt,
+    mode,
     s.agent,
     s.model,
     s.project,
     parsed.skills,
-    parsed.mode === 'plan',
+    mode === 'plan',
   );
   const draft = env.store.getDraft(id);
   if (!draft) return err(400, 'E_BAD_ARG');
@@ -412,6 +428,8 @@ function confirmDraft(env: ApiEnv, chatId: number, id: number): ApiResult {
   // B1.4 + M2: the STORED card decides — its plan flag and its agent/model/
   // project snapshot. Re-reading the session here is exactly the drift the
   // reviewer measured (draft said model:"" → task ran "drifted-model").
+  // W8 F1: a preset draft's stored prompt already carries the role prefix
+  // (baked in by postDrafts), so it submits verbatim — never prefixed twice.
   // Empty strings pass through VERBATIM: `''` means "not set, no session
   // fallback" and must survive `??` in queue.submit; mapping them to
   // `undefined` here would re-arm the session fallback and reintroduce drift.
@@ -447,9 +465,13 @@ function postTasks(env: ApiEnv, chatId: number, body: unknown): ApiResult {
   if ('status' in parsed) return parsed;
   // Direct launch (retry/continue templates use the endpoints below): the live
   // session IS the run context here — there is no card to restore.
-  const state = env.queue.submit(chatId, parsed.prompt, TASK_MODE[parsed.mode], [], {
+  // W8 F1: same preset rule as drafts — name in, role prefix applied here.
+  const prompt = parsed.preset !== '' ? applyPreset(parsed.preset, parsed.prompt) : parsed.prompt;
+  const mode = parsed.preset !== '' ? 'code' : parsed.mode;
+  const state = env.queue.submit(chatId, prompt, TASK_MODE[mode], [], {
     skills: parsed.skills,
-    planOnly: parsed.mode === 'plan',
+    planOnly: mode === 'plan',
+    preset: parsed.preset !== '' ? parsed.preset : undefined,
   });
   return { status: 200, body: { task_id: lastTaskOf(env, chatId), state } };
 }
