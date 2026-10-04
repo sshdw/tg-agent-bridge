@@ -575,3 +575,28 @@ a {
   from { opacity: 0.04; }
   to { opacity: 0.12; }
 }
+
+/* W7 motion tokens — verbatim from the frozen skill references/motion.md.
+ * W5 referenced these curves but never defined them; the sheet needs
+ * --spring-sheet (present 300 ms) + --ease-in (dismiss). */
+:root {
+  --spring-press:
+    linear(0, 0.081, 0.257, 0.458, 0.642, 0.791, 0.9, 0.971,
+           1.013, 1.033, 1.038, 1.036, 1.029, 1.021, 1.014);
+  --spring-card:
+    linear(0, 0.078, 0.242, 0.424, 0.588, 0.722, 0.823, 0.895,
+           0.943, 0.973, 0.991, 1, 1.005, 1.006, 1.006);
+  --spring-sheet:
+    linear(0, 0.061, 0.194, 0.347, 0.494, 0.622, 0.726, 0.807,
+           0.868, 0.913, 0.944, 0.966, 0.98, 0.99, 0.995, 0.999, 1);
+  --spring-nav:
+    linear(0, 0.079, 0.246, 0.431, 0.6, 0.737, 0.839, 0.911,
+           0.958, 0.986, 1.002, 1.009, 1.011, 1.011, 1.009);
+  --spring-open:
+    linear(0, 0.05, 0.163, 0.302, 0.441, 0.568, 0.677, 0.766,
+           0.836, 0.889, 0.928, 0.957, 0.976, 0.989, 0.997,
+           1.001, 1.004, 1.005, 1.005);
+  --ease-out:   cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in:    cubic-bezier(0.55, 0.06, 0.68, 0.19);
+  --ease-std:   cubic-bezier(0.4, 0.0, 0.2, 1);
+}

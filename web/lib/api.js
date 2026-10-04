@@ -76,6 +76,19 @@ export function createApiClient({ base = '', getInitData = () => '', fetchImpl =
     taskDiff: (id, path) =>
       req(`/api/tasks/${String(id)}/diff`, { query: { path: String(path ?? '') } }),
     downloadUrl: (path) => downloadUrl(path),
+    /* W7: pickers / settings / health / skills / drafts (all shapes per src/miniapp/api.ts). */
+    pickersAgents: () => req('/api/pickers/agents'),
+    pickersModels: () => req('/api/pickers/models'),
+    pickersProjects: () => req('/api/pickers/projects'),
+    settings: () => req('/api/settings'),
+    updateSettings: (patch) => req('/api/settings', { method: 'PUT', body: patch }),
+    health: () => req('/api/health'),
+    skills: () => req('/api/skills'),
+    updateSkills: (pins, auto) => req('/api/skills', { method: 'PUT', body: { pins, auto } }),
+    postDraft: (prompt, mode, skills) =>
+      req('/api/drafts', { method: 'POST', body: { prompt, mode, skills } }),
+    confirmDraft: (id) => req(`/api/drafts/${String(id)}/confirm`, { method: 'POST', body: {} }),
+    discardDraft: (id) => req(`/api/drafts/${String(id)}/discard`, { method: 'POST', body: {} }),
   };
 }
 

@@ -399,4 +399,204 @@
   .btn:active {
     transform: none;
   }
+  .sheet-card,
+  .sheet-card.leaving {
+    animation: none;
+  }
+}
+
+/* ---- W7 More + confirmation sheet (flat content + one elevated sheet) ----
+ * The sheet is the ONLY elevated-outside-nav/float case: .glass-elevated
+ * (35% scrim built into the class, tokens.css) on a transparent overlay.
+ * Present 300 ms --spring-sheet, dismiss 300 ms --ease-in. transform and
+ * opacity only. No blur, no theme-sourced color, no fixed color literals. */
+
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: var(--sp-4);
+  padding-bottom: calc(var(--sp-4) + var(--safe-bottom));
+}
+
+.sheet-card {
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100svh - 96px);
+  overflow-y: auto;
+  padding: var(--sp-4);
+  animation: sheet-in 300ms var(--spring-sheet) both;
+}
+
+.sheet-card.leaving {
+  animation: sheet-out 300ms var(--ease-in) both;
+}
+
+@keyframes sheet-in {
+  from { opacity: 0; transform: translate3d(0, 24px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes sheet-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(0, 24px, 0); }
+}
+
+.sheet-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+}
+
+.ctx-block {
+  margin-top: var(--sp-3);
+}
+
+.ctx-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding-block: var(--sp-1);
+}
+
+.ctx-val {
+  font-size: var(--fs-sub);
+  line-height: var(--lh-sub);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.chip {
+  border: 0;
+  border-radius: var(--r-pill);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  font-weight: 600;
+  font-family: var(--font-sans);
+  background: var(--surface-section);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+  cursor: pointer;
+  transition:
+    transform 180ms var(--spring-press),
+    opacity 180ms var(--spring-press);
+}
+
+.chip:active {
+  transform: scale(0.97);
+  opacity: 0.88;
+  transition-duration: 90ms;
+  transition-timing-function: var(--ease-std);
+}
+
+.chip[aria-pressed="true"] {
+  font-weight: 700;
+  box-shadow: inset 0 0 0 2px var(--line);
+}
+
+.more-sec {
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.more-title {
+  margin-bottom: var(--sp-2);
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-block: var(--sp-2);
+}
+
+.set-val {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-size: var(--fs-sub);
+  line-height: var(--lh-sub);
+}
+
+.opt-list {
+  margin-bottom: var(--sp-2);
+}
+
+.opt-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sig-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.reason {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--surface-solid);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+}
+
+.skill-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  overflow-wrap: anywhere;
+}
+
+.skill-row {
+  padding-bottom: 0;
+}
+
+.root-line {
+  padding: var(--sp-1) var(--sp-2);
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  overflow-wrap: anywhere;
+}
+
+.text-area {
+  width: 100%;
+  margin-top: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-solid);
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-sub);
+  resize: vertical;
+  min-height: 88px;
+}
+
+:root[data-perf="lite"] .sheet-card,
+:root[data-perf="lite"] .sheet-card.leaving {
+  animation: fade-in 150ms var(--ease-std) both;
+}
+
+:root[data-perf="reduced"] .sheet-card,
+:root[data-perf="reduced"] .sheet-card.leaving {
+  animation-duration: 150ms;
 }

@@ -90,6 +90,7 @@ export function renderHome({ running = null, recent = [] } = {}) {
       `<section class="empty-state" aria-label="No active task">` +
       `<div class="h-title">No active task</div>` +
       `<p class="h-caption">Send a message in chat to start one.</p>` +
+      `<button class="btn btn-primary" type="button" data-action="new-task">New task</button>` +
       `</section>` +
       recentList(recent),
     float: '',

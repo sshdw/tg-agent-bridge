@@ -65,7 +65,7 @@ export function renderTaskDetails(t = {}) {
     `<div class="h-caption">status <span class="status-hl">${escapeHtml(t.status ?? '')}</span></div>` +
     `<div class="h-caption">cost <span class="metric">${formatCost(t.cost_usd)}</span></div>` +
     `<div class="h-caption">elapsed <span class="metric" data-elapsed-base="${Number(t.elapsed_s) || 0}">${formatElapsed(t.elapsed_s)}</span></div>` +
-    `<div class="detail-block"><span class="h-caption">skills</span><div>${skillsLine(t.skills_used)}</div></div>` +
+    `<div class="detail-block" data-testid="skills-used"><span class="h-caption">skills</span><div>${skillsLine(t.skills_used)}</div></div>` +
     `<div class="detail-block"><span class="h-caption">files</span><div>${filesLine(t.files_summary)}</div></div>` +
     `<div class="detail-block"><label class="h-caption" for="continue-text">Continue with instructions</label>` +
     `<input class="text-input" id="continue-text" data-continue-input="${id}" type="text" maxlength="4000" placeholder="What should change?">` +
