@@ -2,7 +2,8 @@
  * W5 API client + poller — PURE module, no DOM, no Telegram API.
  * Importable from node >= 22 as ESM and from web/app.js.
  * Uses only the W4 contract: GET current/recent/one(+since_rev),
- * POST stop/retry/continue. Timestamps stay Unix seconds, server-side.
+ * POST stop/retry/continue, GET files/preview/download/diff,
+ * GET tasks/:id/files + tasks/:id/diff. Timestamps stay Unix seconds, server-side.
  */
 
 /** Active poll cadence while a task runs (AC6: 1000..2000 ms). */
@@ -68,9 +69,24 @@ export function createApiClient({ base = '', getInitData = () => '', fetchImpl =
     retry: (id) => req(`/api/tasks/${String(id)}/retry`, { method: 'POST', body: {} }),
     continueTask: (id, text) =>
       req(`/api/tasks/${String(id)}/continue`, { method: 'POST', body: { text } }),
+    listFiles: (dir = '.') => req('/api/files', { query: { dir: String(dir ?? '.') } }),
+    filePreview: (path) => req('/api/files/preview', { query: { path: String(path ?? '') } }),
+    fileDiff: (path) => req('/api/files/diff', { query: { path: String(path ?? '') } }),
+    taskFiles: (id) => req(`/api/tasks/${String(id)}/files`),
+    taskDiff: (id, path) =>
+      req(`/api/tasks/${String(id)}/diff`, { query: { path: String(path ?? '') } }),
+    downloadUrl: (path) => downloadUrl(path),
   };
 }
 
+/**
+ * Download URL builder (pure string — the bytes travel outside JSON, via
+ * Telegram.WebApp.downloadFile with an openLink fallback). Exported
+ * standalone so screens can build links without a client instance.
+ */
+export function downloadUrl(path) {
+  return `/api/files/download?path=${encodeURIComponent(String(path ?? ''))}`;
+}
 /**
  * Transport poller with injectable scheduler. Semantics under test (AC6):
  * - paused while isActive() is false (no fetch, idle reschedule);
