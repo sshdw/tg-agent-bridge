@@ -747,7 +747,9 @@ async function runConfirmCard() {
   try {
     // Single-open semantics are server-side: this POST expires any older
     // open draft for the chat (api.ts createDraft), the client keeps none.
-    const d = await client.postDraft(v.payload.prompt, v.payload.mode, v.payload.skills);
+    // The preset NAME rides along (never body text); the server bakes the
+    // role prefix into the stored draft before confirm runs it.
+    const d = await client.postDraft(v.payload.prompt, v.payload.mode, v.payload.skills, v.payload.preset);
     const id = d.body && d.body.draft ? Number(d.body.draft.id) : NaN;
     if (d.status !== 200 || !Number.isInteger(id)) {
       c.busy = false;

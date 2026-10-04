@@ -7,10 +7,10 @@
  * substitutes body text): this module knows exactly the three preset NAMES
  * ('review' | 'test' | 'fix') and never any preset body string. Selecting a
  * preset forces mode 'code' (every preset is a /code variant —
- * src/core/router.ts:421-426). Server-side substitution of the role prefix
- * through POST /api/drafts is NOT possible (the endpoint accepts only
- * prompt/mode/skills — src/miniapp/api.ts parseRunBody), so the name travels
- * in client state only and the prompt the owner typed is sent verbatim.
+ * src/core/router.ts:421-426). The name travels to the server in the
+ * POST /api/drafts (and /api/tasks) body as `preset`; the server applies the
+ * role prefix via applyPreset before the run (src/miniapp/api.ts W8 F1), so
+ * the prompt the owner typed is sent verbatim plus the preset name.
  *
  * PROMPT_MAX mirrors src/miniapp/api.ts PROMPT_MAX (8000): the client
  * disables Run under exactly the conditions the server would 400 on.
@@ -65,9 +65,10 @@ function skillsPayload(skills) {
 
 /**
  * Pure Run-gate. Returns {ok, disabled, reason, mode, preset, prompt,
- * payload}. `payload` ({prompt, mode, skills}) is exactly the POST
+ * payload}. `payload` ({prompt, mode, skills[, preset]}) is exactly the POST
  * /api/drafts body the client sends — empty prompt disables Run, over-limit
- * disables Run (the server would 400 E_BAD_ARG on both).
+ * disables Run (the server would 400 E_BAD_ARG on both). The preset NAME
+ * rides along only when one is selected (never body text).
  */
 export function validateDraft({ text = '', mode = 'ask', preset = '', skills = [] } = {}) {
   const raw = String(text ?? '');
@@ -85,7 +86,7 @@ export function validateDraft({ text = '', mode = 'ask', preset = '', skills = [
     ok: true,
     disabled: false,
     reason: '',
-    payload: { prompt: raw, mode: m, skills: skillsPayload(skills) },
+    payload: { prompt: raw, mode: m, skills: skillsPayload(skills), ...(p !== '' ? { preset: p } : {}) },
   };
 }
 

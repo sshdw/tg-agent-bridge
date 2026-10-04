@@ -249,7 +249,7 @@ assert(/content-type.*text\/javascript|'\.js'/.test(httpTs), 'http.ts: content-t
 g('shell misc');
 assert((indexHtml.match(/<button[^>]*data-tab/g) ?? []).length === 4, '4 tab buttons');
 assert(/Files.*W6|Project explorer lands in W6/.test(appJs), 'Files stub placeholder (W6)');
-assert(/More.*W7|land in W7/.test(appJs), 'More stub placeholder (W7)');
+assert(/renderMore\(|moreViewModel\(\)/.test(appJs), 'More tab real (W7 landed, stub superseded)');
 assert(/\.skeleton/.test(tokens), '.skeleton placeholder class present');
 assert(/prefers-reduced-motion/.test(appCss), 'prefers-reduced-motion -> instant in app CSS');
 assert(/data-perf="lite"/.test(tokens) && /data-perf="reduced"/.test(tokens), 'perf ladder full|reduced|lite in tokens');

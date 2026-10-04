@@ -1,26 +1,15 @@
 import type { Bot, Context } from 'grammy';
 import type { Config } from '../config.js';
-import { AGENT_IDS } from '../config.js';
 import { approvalReply, resolveApproval } from '../core/approvals.js';
 import type { Responder } from '../core/queue.js';
 import { TaskQueue } from '../core/queue.js';
-import { listProjects } from '../core/projects.js';
-export type { ProjectEntry } from '../core/projects.js';
-import { dropAgentSession, getOrCreate, updateSession } from '../core/sessions.js';
-import { projectDeniedMessage, resolveWorkdir } from '../core/permissions.js';
-import { cachedModels, matchModels, pickModels } from '../gateway/models.js';
-import { availableProviders } from '../gateway/registry.js';
+import { cachedModels, matchModels } from '../gateway/models.js';
 import type { Store } from '../storage/db.js';
 import {
   approveDenyKeyboard,
-  agentPickerKeyboard,
-  modelKeyboard,
   parsePlanPayload,
-  parseUpdatePayload,
-  projectPickerKeyboard,
   SCOPE,
   planKeyboard,
-  updateConfirmKeyboard,
 } from './keyboard.js';
 import { parseCallback, take } from './nonce.js';
 
@@ -43,27 +32,8 @@ export interface CallbackDeps {
   io: Responder;
 }
 
-/* ----------------------------------------------------------------- projects */
-
-/** Re-exported from the shared module so existing import sites keep working. */
-export { listProjects, rootLabel } from '../core/projects.js';
-
 /** Short Russian notice for a nonce that is expired / used / from another chat. */
 const STALE = '⌛ Кнопка устарела. Отправь команду заново.';
-
-/**
- * The `/update` flow lives in `src/core/update.ts`; this is the Telegram seam
- * that runs it after the double-confirm buttons. The button router above
- * already handled stage 1 ("обновить?") → stage 2 ("точно обновить?"), so by
- * the time we get here the owner confirmed twice.
- */
-export async function runUpdateConfirm(ctx: Context, cfg: Config, _io: Responder, stage: 1 | 2): Promise<void> {
-  void cfg;
-  void _io;
-  void stage;
-  const { confirmUpdate } = await import('../core/update.js');
-  await confirmUpdate({ reply: (text: string) => ctx.reply(text) });
-}
 
 /** Plan actions: delegate to the queue's state machine, never reimplement it. */
 async function handlePlan(ctx: Context, deps: CallbackDeps, payload: string): Promise<void> {
@@ -128,71 +98,9 @@ export function registerCallbacks(bot: Bot, deps: CallbackDeps): void {
           break;
         }
 
-        case SCOPE.agent: {
-          if (!(AGENT_IDS as readonly string[]).includes(payload)) {
-            await ctx.answerCallbackQuery({ text: 'Нет такого агента' });
-            break;
-          }
-          const prevAgent = deps.store.getSession(chatId)?.agent;
-          updateSession(deps.store, chatId, { agent: payload as (typeof AGENT_IDS)[number] });
-          if (prevAgent !== undefined && prevAgent !== payload) dropAgentSession(deps.store, chatId);
-          await ctx.answerCallbackQuery({ text: `Агент: ${payload}` });
-          await ctx.reply(`Агент: ${payload}`);
-          break;
-        }
-
-        case SCOPE.model: {
-          updateSession(deps.store, chatId, { model: payload });
-          await ctx.answerCallbackQuery({ text: payload === '' ? 'Модель сброшена' : `Модель: ${payload}` });
-          await ctx.reply(payload === '' ? 'Модель сброшена (default).' : `Модель: ${payload}`);
-          break;
-        }
-
-        case SCOPE.project: {
-          // The payload is the ABSOLUTE directory the picker enumerated, minted into a
-          // server-side nonce; the guard still has the last word on it.
-          let dir = payload;
-          if (payload !== '') {
-            try {
-              dir = resolveWorkdir(deps.cfg, chatId, payload);
-            } catch (e) {
-              await ctx.answerCallbackQuery({ text: 'Папка недоступна' });
-              await ctx.reply(projectDeniedMessage(e));
-              break;
-            }
-          }
-          const prevProject = deps.store.getSession(chatId)?.project;
-          updateSession(deps.store, chatId, { project: dir });
-          if (prevProject !== undefined && prevProject !== dir) dropAgentSession(deps.store, chatId);
-          await ctx.answerCallbackQuery({ text: payload === '' ? 'Песочница' : `Проект: ${payload}` });
-          await ctx.reply(payload === '' ? 'Проект: (песочница)' : `Проект: ${dir}`);
-          break;
-        }
-
         case SCOPE.plan: {
           await ctx.answerCallbackQuery();
           await handlePlan(ctx, deps, payload);
-          break;
-        }
-
-        case SCOPE.update: {
-          const decoded = parseUpdatePayload(payload);
-          await ctx.answerCallbackQuery();
-          if (decoded === null) {
-            await ctx.reply(STALE);
-            break;
-          }
-          if (decoded.decision === 'no') {
-            await ctx.reply('Отменено.');
-            break;
-          }
-          if (decoded.stage === 1) {
-            await ctx.reply('Точно обновить? Процесс перезапустится.', {
-              reply_markup: updateConfirmKeyboard(chatId, 2),
-            });
-            break;
-          }
-          await runUpdateConfirm(ctx, deps.cfg, deps.io, 2);
           break;
         }
 
@@ -209,65 +117,6 @@ export function registerCallbacks(bot: Bot, deps: CallbackDeps): void {
       await ctx.answerCallbackQuery().catch(() => undefined);
     }
   });
-}
-
-/** Register the `/agent` picker entry point (no-argument path). */
-export async function showAgentPicker(ctx: Context, deps: CallbackDeps): Promise<void> {
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) return;
-  const s = getOrCreate(deps.store, deps.cfg, chatId);
-  const agents = availableProviders();
-  await ctx.reply(
-    `Агент: ${s.agent}\nДоступны: ${agents.join(', ')}`,
-    { reply_markup: agentPickerKeyboard(chatId, agents, s.agent) },
-  );
-}
-
-/** Register the `/project` picker entry point (no-argument path). */
-export async function showProjectPicker(ctx: Context, deps: CallbackDeps): Promise<void> {
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) return;
-  const s = getOrCreate(deps.store, deps.cfg, chatId);
-  const projects = listProjects(deps.cfg);
-  const current = s.project === '' ? '(песочница)' : s.project;
-  if (projects.length === 0) {
-    await ctx.reply(
-      `Проект: ${current}\n\nПапок в разрешённых корнях пока нет: ${deps.cfg.allowedRoots.join(', ')}`,
-    );
-    return;
-  }
-  await ctx.reply(`Проект: ${current}\nКорни: ${deps.cfg.allowedRoots.join(', ')}`, {
-    reply_markup: projectPickerKeyboard(chatId, projects, s.project),
-  });
-}
-
-/**
- * Register the `/model` picker entry point (no-argument path).
- *
- * The list comes from the live `opencode models` output (cached 6 h), not from a
- * hardcoded array — the old hardcoded ids were invented and none of them existed. When
- * the CLI cannot be run the owner gets a clear Russian notice instead of a picker full
- * of dead buttons, and the current/default models still work.
- */
-export async function showModelPicker(ctx: Context, deps: CallbackDeps): Promise<void> {
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) return;
-  const s = getOrCreate(deps.store, deps.cfg, chatId);
-  const listed = await cachedModels(deps.cfg.opencodeBin);
-  const pins = [s.model, deps.cfg.defaultModel];
-  const picks = pickModels(listed.models, pins);
-  const head = `Модель: ${s.model === '' ? `(default) ${deps.cfg.defaultModel || '—'}` : s.model}`;
-  if (picks.length === 0) {
-    await ctx.reply(
-      `${head}\n\n⚠️ Не удалось получить список моделей: ${listed.error ?? 'opencode models вернул пусто'}.\n` +
-        'Проверь OPENCODE_BIN в .env. Текущая модель продолжает работать.',
-    );
-    return;
-  }
-  await ctx.reply(
-    `${head}\nНайдено моделей: ${listed.models.length}${listed.cached ? ' (из кэша)' : ''}. Показано: ${picks.length}.`,
-    { reply_markup: modelKeyboard(chatId, picks, s.model) },
-  );
 }
 
 /**
