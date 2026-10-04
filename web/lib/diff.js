@@ -27,7 +27,6 @@ export function parseUnifiedDiff(text) {
     const m = TRAILER_RE.exec(line);
     if (m) {
       dropped = Number(m[1]) || 0;
-      rows.push({ kind: 'meta', text: line });
       continue;
     }
     if (line.startsWith('@@')) {

@@ -29,7 +29,7 @@ export function joinAbsRel(abs, rel) {
   const a = String(abs ?? '');
   const r = String(rel ?? '');
   if (r === '') return a;
-  return `${a.replace(/[/\\]+$/, '')}/${r}`;
+  return `${a.replace(/[/\\]+$/, '')}/${r.replace(/^\/+/, '')}`;
 }
 
 /**

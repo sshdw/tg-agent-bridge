@@ -141,6 +141,7 @@ g('C single renderDiff');
   assert(d.html.includes('+3') && d.html.includes('−2'), 'counts header shows +3 −2');
   const t = files.renderDiff({ path: 'src/a.ts', diff: TRUNC_DIFF, truncated: true, added: 3, removed: 2 });
   assert(t.html.includes('…ещё 12 строк'), 'truncated shows …ещё N строк');
+  assert(t.html.split('…ещё 12 строк').length - 1 === 1, 'truncated trailer renders exactly once (no duplicate row in .diff-view)');
   const b = files.renderDiff({ path: 'img.png', binary: true, added: 0, removed: 0 });
   assert(b.html.includes('img.png') && !/diff-add|diff-del/.test(b.html), 'binary diff -> name only, no rows');
   const ng = files.renderDiff({ path: 'src/a.ts', no_git: true, diff: '' });
@@ -168,6 +169,7 @@ g('C copy-path byte-exactness');
   assert(clips.length === 1 && clips[0] === 'D:\\proj/src/a.ts', 'stub clipboard received the byte-exact string');
   assert(haptic === 1, 'HapticFeedback.selectionChanged fires on copy');
   assert(files.joinAbsRel('D:\\proj\\', 'src/a.ts') === 'D:\\proj/src/a.ts', 'trailing separators collapse');
+  assert(files.joinAbsRel('D:/x/', '/y') === 'D:/x/y', 'leading slash in rel collapses (no double slash)');
   assert(files.joinAbsRel('D:\\proj', '') === 'D:\\proj', 'empty rel -> bare abs');
 }
 
