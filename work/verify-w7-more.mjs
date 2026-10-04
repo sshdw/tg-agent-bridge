@@ -196,6 +196,7 @@ g('F design + contract inventory');
   assert(!/var\(--accent-(?:action|text)\)|var\(--danger\)/.test(`${moreSrc}\n${confirmSrc}`), 'no accent/danger vars in new screens');
   const bodies = ['ordered by severity', 'Do NOT modify files', 'keep the diff minimal', 'Diagnose the root cause', 'the whole project in the working directory', 'run the existing test suite', 'smallest reasonable diff', 'files to touch'];
   assert(bodies.every((b) => !cssAll.includes(b)), 'zero preset body text in web/ (names only)');
+  assert(!/role prefix is applied server-side/.test(cssAll), 'no false server-side role-prefix claim in web/ (preset channel is W8)');
   const scopeBlock = (keyboardSrc.match(/SCOPE = \{[\s\S]*?\} as const/) ?? [''])[0];
   const keys = (scopeBlock.match(/\n  [a-z]+: '/g) ?? []).length;
   assert(keys === 6 && ['approve', 'agent', 'model', 'project', 'plan', 'update'].every((k) => scopeBlock.includes(`${k}: '`)), 'keyboard.ts SCOPE unchanged (6 scopes, no new)');

@@ -80,7 +80,7 @@ export function renderConfirm({
   const runDisabled = v.disabled || busy ? ' disabled' : '';
   const presetNote =
     v.preset !== ''
-      ? `<p class="h-caption">Preset ${escapeHtml(v.preset)} — runs as Code; the role prefix is applied server-side.</p>`
+      ? `<p class="h-caption">Preset ${escapeHtml(v.preset)} — runs as Code. Role-prefix substitution pending drafts preset channel (W8).</p>`
       : '';
   const html =
     `<div class="sheet-scrim" data-action="draft-edit">` +
