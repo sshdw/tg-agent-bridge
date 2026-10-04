@@ -251,7 +251,11 @@ export function createMiniServer(deps: MiniServerDeps): MiniServer {
       json(res, 404, { error: 'E_NOT_FOUND' });
       return;
     }
-    res.writeHead(200, { 'content-type': type });
+    // W5: app.js must never go stale after a deploy — no-cache it.
+    // Every other static asset keeps the default (no explicit policy).
+    const headers: Record<string, string> = { 'content-type': type };
+    if (rel === 'app.js' || rel.endsWith('/app.js')) headers['cache-control'] = 'no-cache';
+    res.writeHead(200, headers);
     res.end(body);
   };
 
