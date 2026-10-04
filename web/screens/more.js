@@ -53,9 +53,17 @@ function optionList(kind, options, current) {
   return `<div class="opt-list" role="listbox" aria-label="${escapeHtml(kind)} options">${rows}</div>`;
 }
 
+function loadingBlock() {
+  return (
+    `<div aria-hidden="true"><span class="skeleton skel" style="width: 62%"></span>` +
+    `<span class="skeleton skel" style="width: 84%"></span></div>` +
+    `<p class="h-caption">Loading…</p>`
+  );
+}
+
 function sessionSection(settings, pickers, openPicker) {
   if (!settings) {
-    return section('Session', '<p class="h-caption">Loading…</p>', 'more-session');
+    return section('Session', loadingBlock(), 'more-session');
   }
   const kinds = ['agent', 'model', 'project'];
   const labels = { agent: 'Agent', model: 'Model', project: 'Project' };
@@ -83,7 +91,7 @@ function signalRow(signal, value, open) {
 
 function statusSection(health, healthOpen) {
   if (!health) {
-    return section('Bridge status', '<p class="h-caption">Loading…</p>', 'more-status');
+    return section('Bridge status', loadingBlock(), 'more-status');
   }
   let inner = '';
   for (const s of HEALTH_SIGNALS) {
@@ -126,7 +134,7 @@ function perfSection(perf) {
 
 function settingsSection(settings) {
   if (!settings) {
-    return section('Settings', '<p class="h-caption">Loading…</p>', 'more-settings');
+    return section('Settings', loadingBlock(), 'more-settings');
   }
   const auto = settings.auto_approve === true;
   const roots = Array.isArray(settings.allowed_roots) ? settings.allowed_roots : [];
@@ -149,11 +157,20 @@ function skillsSection(skills, skillsAuto) {
       ? '<p class="h-caption">No skills found.</p>'
       : list
           .map(
-            (s) =>
-              `<div class="set-row skill-row"><span class="skill-name">${escapeHtml(s.name)}</span>` +
-              `<button class="chip" type="button" data-action="skills-pin" data-skill="${escapeHtml(s.name)}" aria-pressed="${s.pinned === true ? 'true' : 'false'}">` +
-              `${s.pinned === true ? 'Pinned' : 'Pin'}</button></div>` +
-              `<p class="h-caption">${escapeHtml(s.description ?? '')} · ${escapeHtml(s.source ?? '')}</p>`,
+            (s) => {
+              /* Sub-line only when the server sent something to show:
+               * empty description+source rendered a stray "·" row. */
+              const bits = [s.description, s.source]
+                .map((v) => String(v ?? '').trim())
+                .filter((v) => v !== '');
+              const sub = bits.length === 0 ? '' : `<p class="h-caption">${escapeHtml(bits.join(' · '))}</p>`;
+              return (
+                `<div class="set-row skill-row"><span class="skill-name">${escapeHtml(s.name)}</span>` +
+                `<button class="chip" type="button" data-action="skills-pin" data-skill="${escapeHtml(s.name)}" aria-pressed="${s.pinned === true ? 'true' : 'false'}">` +
+                `${s.pinned === true ? 'Pinned' : 'Pin'}</button></div>` +
+                sub
+              );
+            },
           )
           .join('');
   const inner =

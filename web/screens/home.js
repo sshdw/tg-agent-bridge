@@ -32,6 +32,31 @@ export function formatCost(costUsd) {
   return `$${n.toFixed(4)}`;
 }
 
+/* Designed empty states: icon tile + title + sub (+ optional action).
+ * `hero` centers the block in the tab's free space (top-level states only);
+ * inline states (no git, no diff) stay compact. Icons are inline SVG,
+ * currentColor, 1.75 stroke — no fonts, no raster, no new deps. */
+const EMPTY_ICONS = {
+  idle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8.5V12l2.5 2.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M5 6h14"/><path d="M5 12h14"/><path d="M5 18h14"/></svg>',
+  folder:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M4 6h6l2 2h8v10H4z"/></svg>',
+  code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M9 6l-5 6 5 6"/><path d="M15 6l5 6-5 6"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><rect x="5" y="7" width="14" height="12" rx="2"/><path d="M5 10.5h14"/></svg>',
+};
+
+export function emptyState({ icon = 'list', title = '', sub = '', action = '', label = '', hero = false } = {}) {
+  const art = `<span class="empty-icon" aria-hidden="true">${EMPTY_ICONS[icon] ?? EMPTY_ICONS.list}</span>`;
+  return (
+    `<section class="empty-state${hero ? ' empty-hero' : ''}" aria-label="${escapeHtml(label || title)}">` +
+    art +
+    `<div class="h-title">${escapeHtml(title)}</div>` +
+    (sub === '' ? '' : `<p class="h-caption">${escapeHtml(sub)}</p>`) +
+    (action === '' ? '' : action) +
+    `</section>`
+  );
+}
+
 function statusLine(t) {
   const agent = escapeHtml(t.agent ?? '—');
   const mode = escapeHtml(t.mode ?? '—');
@@ -39,11 +64,17 @@ function statusLine(t) {
 }
 
 function runningCard(running) {
+  const cost = Number(running.cost_usd);
+  const costLine =
+    Number.isFinite(cost) && cost > 0
+      ? `<div class="h-caption home-meta">cost <span class="metric">${formatCost(cost)}</span></div>`
+      : '';
   return (
     `<section class="content-card home-current" aria-label="Current task">` +
     `<div class="h-sub home-title">${escapeHtml(running.title ?? '')}</div>` +
-    `<div class="h-caption">${escapeHtml(running.status ?? '')} · ${statusLine(running)}</div>` +
+    `<div class="h-caption"><span class="status-hl">${escapeHtml(running.status ?? '')}</span> · ${statusLine(running)}</div>` +
     `<div class="metric home-elapsed" data-elapsed-base="${Number(running.elapsed_s) || 0}">${formatElapsed(running.elapsed_s)}</div>` +
+    costLine +
     `</section>`
   );
 }
@@ -81,18 +112,20 @@ function recentList(tasks) {
 export function renderHome({ running = null, recent = [] } = {}) {
   if (running) {
     return {
-      html: runningCard(running),
+      html: runningCard(running) + recentList(recent),
       float: homeFloatBar(running),
     };
   }
   return {
     html:
-      `<section class="empty-state" aria-label="No active task">` +
-      `<div class="h-title">No active task</div>` +
-      `<p class="h-caption">Send a message in chat to start one.</p>` +
-      `<button class="btn btn-primary" type="button" data-action="new-task">New task</button>` +
-      `</section>` +
-      recentList(recent),
+      emptyState({
+        icon: 'idle',
+        title: 'No active task',
+        sub: 'Send a message in chat to start one.',
+        action: '<button class="btn btn-primary" type="button" data-action="new-task">New task</button>',
+        label: 'No active task',
+        hero: true,
+      }) + recentList(recent),
     float: '',
   };
 }

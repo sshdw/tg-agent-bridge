@@ -55,6 +55,26 @@ const state = {
   confirm: null,
 };
 
+/* Known Telegram themeParams keys (theme.md §1 table). Values are mirrored
+ * to --tg-theme-*; anything else is ignored. */
+const THEME_VAR_KEYS = {
+  bg_color: 1,
+  secondary_bg_color: 1,
+  section_bg_color: 1,
+  header_bg_color: 1,
+  bottom_bar_bg_color: 1,
+  text_color: 1,
+  hint_color: 1,
+  link_color: 1,
+  button_color: 1,
+  button_text_color: 1,
+  accent_text_color: 1,
+  destructive_text_color: 1,
+  section_header_text_color: 1,
+  subtitle_text_color: 1,
+  section_separator_color: 1,
+};
+
 function el(id) {
   return doc ? doc.getElementById(id) : null;
 }
@@ -69,6 +89,19 @@ const client = createApiClient({ getInitData });
 
 function readThemeTokens() {
   if (!doc) return;
+  /* T1: Telegram themeParams are the source of truth. Mirror every known
+   * key to its --tg-theme-* variable (dash-joined); invalid/absent keys
+   * are removed so the neutral fallbacks in tokens.css take over. Custom
+   * themes can never crash this loop. */
+  const tp = tg?.themeParams ?? {};
+  for (const k of Object.keys(THEME_VAR_KEYS)) {
+    const v = tp[k];
+    if (typeof v === 'string' && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v.trim())) {
+      doc.documentElement.style.setProperty(`--tg-theme-${k.replace(/_/g, '-')}`, v.trim());
+    } else {
+      doc.documentElement.style.removeProperty(`--tg-theme-${k.replace(/_/g, '-')}`);
+    }
+  }
   const r = readThemeTokensPure({
     colorScheme: tg?.colorScheme,
     themeParams: tg?.themeParams,
@@ -571,12 +604,28 @@ function moveIndicator() {
   ind.style.setProperty('--ind-x', `${box.left - navBox.left}px`);
 }
 
+function syncHead() {
+  /* Top-bar status pill mirrors the poller state the shell already owns:
+   * running task -> Active, otherwise Idle. No invented data. */
+  if (!doc) return;
+  const live = !!state.current?.running;
+  const text = doc.getElementById('app-status-text');
+  if (text) text.textContent = live ? 'Active' : 'Idle';
+  const pill = doc.getElementById('app-status');
+  if (pill) pill.setAttribute('data-live', live ? '1' : '0');
+}
+
 function paint(view) {
   const screen = el('screen');
   const slot = el('float-slot');
-  if (screen) screen.innerHTML = view.html;
+  if (screen) {
+    screen.innerHTML = view.html;
+    if (view.float) screen.setAttribute('data-float', '1');
+    else screen.removeAttribute('data-float');
+  }
   if (slot) slot.innerHTML = view.float;
   stampElapsed();
+  syncHead();
   syncBack();
 }
 
@@ -690,8 +739,10 @@ async function refreshAll() {
     const r = await client.recent(20, 0);
     if (r.status !== 304 && r.body && Array.isArray(r.body.tasks)) {
       state.recent = r.body.tasks;
-      if (state.tab === 'home' && !state.current?.running) {
-        paint(renderHome({ running: null, recent: state.recent }));
+      /* Home shows the recent list under the running card too, so a fresh
+       * list always repaints the tab (running or idle). */
+      if (state.tab === 'home') {
+        paint(renderHome({ running: state.current?.running ?? null, recent: state.recent }));
       } else if (state.tab === 'tasks' && !state.detailId) {
         paint(renderTasks({ tasks: state.recent }));
       }
@@ -1102,8 +1153,8 @@ function boot() {
       if (r.body && Array.isArray(r.body.tasks)) {
         state.recent = r.body.tasks;
         if (state.tab === 'tasks' && !state.detailId) paintTasks();
-        else if (state.tab === 'home' && !state.current?.running) {
-          paint(renderHome({ running: null, recent: state.recent }));
+        else if (state.tab === 'home') {
+          paint(renderHome({ running: state.current?.running ?? null, recent: state.recent }));
         }
       }
     },
