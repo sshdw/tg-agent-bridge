@@ -1138,7 +1138,12 @@ function boot() {
     onData: (r) => {
       if (r.body) {
         state.current = r.body;
-        if (state.tab === 'home') {
+        // N1: skip the destructive home repaint while the confirm sheet is
+        // open (paint() replaces #screen innerHTML, killing the DOM-only
+        // composer text). state.current is already stored above, so the next
+        // poll after close (or closeConfirm's own paint) picks it up —
+        // skip, not stash.
+        if (state.tab === 'home' && !state.confirm) {
           paint(renderHome({ running: r.body.running ?? null, recent: state.recent }));
         }
       }
@@ -1153,7 +1158,9 @@ function boot() {
       if (r.body && Array.isArray(r.body.tasks)) {
         state.recent = r.body.tasks;
         if (state.tab === 'tasks' && !state.detailId) paintTasks();
-        else if (state.tab === 'home') {
+        // N1: same guard as currentPoller — pending tasks are in state.recent,
+        // so skipping this repaint loses nothing; next poll/close repaints.
+        else if (state.tab === 'home' && !state.confirm) {
           paint(renderHome({ running: state.current?.running ?? null, recent: state.recent }));
         }
       }

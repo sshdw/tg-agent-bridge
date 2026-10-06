@@ -354,6 +354,12 @@ body {
   transition-timing-function: var(--ease-std);
 }
 
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
 .btn-danger {
   color: var(--danger);
 }
