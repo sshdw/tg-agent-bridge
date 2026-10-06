@@ -601,3 +601,27 @@ a {
   --ease-in:    cubic-bezier(0.55, 0.06, 0.68, 0.19);
   --ease-std:   cubic-bezier(0.4, 0.0, 0.2, 1);
 }
+
+/* Elevated-sheet specular glint (блик) — the frozen .glass-elevated block has
+ * only backdrop-filter + `inset 0 0 0 1px var(--hairline)` and no highlight.
+ * TRAP: on the sheet, ::before is ALREADY the grab handle (.sheet-card::before,
+ * app.css) at the same specificity (0,1,1); app.css loads after tokens.css, so
+ * a ::before glint would be overridden and invisible — use ::after instead.
+ * TRAP: .glass-elevated sets no position, so an ::after with inset would
+ * resolve against the position:fixed .sheet-scrim; position: relative is
+ * therefore required here. Reuses only the existing --sim-edge* tokens. */
+.glass-elevated { position: relative; }
+.glass-elevated::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(90deg,
+    rgba(255, 255, 255, 0.00) 0%,
+    var(--sim-edge-dim) 25%,
+    var(--sim-edge) 50%,
+    var(--sim-edge-dim) 75%,
+    rgba(255, 255, 255, 0.00) 100%);
+  pointer-events: none;
+}

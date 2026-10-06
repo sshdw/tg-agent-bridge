@@ -26,10 +26,21 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100svh;
+}
+
+/* P0: the open reveal must NOT sit on .app. .app is an ancestor of BOTH the
+ * nav and #float-slot, so while its opacity < 1 it is a backdrop root and the
+ * nav's backdrop-filter can only see .app's own content — the glass reads as
+ * broken for the first 420 ms. Relocate the reveal onto .app-head and .screen,
+ * which contain no glass (nav lives in <nav>, the float bar in #float-slot —
+ * both siblings). Chrome appears instantly while content fades in. */
+.app-head,
+.screen {
   opacity: 0;
 }
 
-.app[data-ready="1"] {
+.app[data-ready="1"] .app-head,
+.app[data-ready="1"] .screen {
   opacity: 1;
   animation: miniapp-open 420ms var(--spring-open) both;
 }
@@ -384,7 +395,8 @@ body {
 }
 
 /* Lite: flat surfaces already handled in tokens; motion cuts to opacity. */
-:root[data-perf="lite"] .app[data-ready="1"] {
+:root[data-perf="lite"] .app[data-ready="1"] .app-head,
+:root[data-perf="lite"] .app[data-ready="1"] .screen {
   animation: fade-in 150ms var(--ease-std) both;
 }
 
@@ -567,7 +579,8 @@ body {
     animation-duration: 1ms;
     animation-iteration-count: 1;
   }
-  .app[data-ready="1"] {
+  .app[data-ready="1"] .app-head,
+  .app[data-ready="1"] .screen {
     animation: none;
     opacity: 1;
   }
@@ -595,7 +608,10 @@ body {
   justify-content: center;
   padding: var(--sp-4);
   padding-bottom: calc(var(--sp-4) + var(--safe-bottom));
-  background: var(--glass-scrim, rgba(14, 22, 33, 0.35));
+  /* No scrim painted here: the 35% dim is carried by .glass-elevated's own
+   * theme-aware scrim (--glass-scrim is redefined per theme in tokens.css),
+   * so this wrapper must stay transparent — painting it twice dimmed the sheet
+   * twice and used a fixed colour literal the header forbids. */
 }
 
 .sheet-card {

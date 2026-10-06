@@ -97,6 +97,33 @@ assert(!/\.content-card[^{]*{[^}]*backdrop-filter|\.list-row[^{]*{[^}]*backdrop-
 // Nesting: no glass-float inside a glass-nav subtree in static shell.
 assert(!/glass-nav[\s\S]{0,2000}glass-float/.test(indexHtml), 'no glass nested inside nav in index.html');
 
+/* ---------------- AC3b: glass polish invariants ---------------- */
+g('AC3b glass polish invariants');
+// (1)+(2) elevated-sheet specular glint (блик) appended below the frozen block.
+assert(tokens.includes('.glass-elevated::after'), 'tokens.css defines .glass-elevated::after glint');
+{
+  const i = tokens.indexOf('.glass-elevated::after');
+  const block = i === -1 ? '' : tokens.slice(i, tokens.indexOf('}', i) + 1);
+  assert(/var\(--sim-edge/.test(block), '.glass-elevated::after glint references var(--sim-edge…)');
+}
+assert(tokens.includes('.glass-elevated { position: relative; }'), '.glass-elevated gets position: relative for its ::after');
+// (3) the sheet wrapper carries no scrim: the 35% dim lives on .glass-elevated.
+{
+  const i = appCss.indexOf('.sheet-scrim {');
+  const block = i === -1 ? '' : appCss.slice(i, appCss.indexOf('}', i) + 1);
+  assert(i !== -1 && !/background:/.test(block), '.sheet-scrim declares no background (single scrim on .glass-elevated)');
+}
+// (4) P0: the open reveal must not sit on .app — an opacity there makes .app a
+// backdrop root and breaks the nav/float glass for the first 420 ms.
+{
+  const i = appCss.indexOf('.app {');
+  const block = i === -1 ? '' : appCss.slice(i, appCss.indexOf('}', i) + 1);
+  assert(i !== -1 && !/opacity:/.test(block), '.app declares no opacity (never a backdrop root at open)');
+}
+// (5) the 420 ms reveal still hangs off the allowlisted .app[data-ready="1"] prefix.
+assert(/\.app\[data-ready="1"\]\s+\.app-head/.test(appCss), 'reveal animates .app-head via the .app[data-ready="1"] prefix');
+assert(/miniapp-open 420ms/.test(appCss), '420 ms miniapp-open reveal preserved');
+
 /* ---------------- AC4: autoPerf units ---------------- */
 g('AC4 autoPerf ladder');
 assert((await perf.autoPerf({ uaClass: 'LOW', measure: false })) === 'lite', 'UA LOW -> lite');
