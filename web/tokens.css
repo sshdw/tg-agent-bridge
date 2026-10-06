@@ -527,8 +527,9 @@ body {
  * Theme-sourced color appears in exactly five selector groups below.
  * ========================================================================== */
 
-/* 1/5 primary action */
-.btn-primary {
+/* 1/5 primary action (compound with .btn so it wins over the flat .btn
+ * background at equal specificity — same group, no new accent place). */
+.btn.btn-primary {
   background: var(--accent-action);
   color: var(--on-accent);
   border: 0;

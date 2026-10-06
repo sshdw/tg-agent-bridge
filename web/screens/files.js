@@ -12,7 +12,7 @@
  * (.status-hl, .btn-danger) — no new accent place is created.
  */
 
-import { escapeHtml } from './home.js';
+import { emptyState, escapeHtml } from './home.js';
 import { chunkRows, DIFF_CHUNK, parseUnifiedDiff } from '../lib/diff.js';
 
 export { escapeHtml };
@@ -86,7 +86,7 @@ function absBar(abs, rel) {
   const full = joinAbsRel(abs, rel);
   return (
     `<div class="abs-bar content-card">` +
-    `<code class="mono abs-path" data-testid="abs-path">${escapeHtml(full)}</code>` +
+    `<code class="mono abs-path" data-testid="abs-path" title="${escapeHtml(full)}">${escapeHtml(full)}</code>` +
     `<button class="btn btn-copy" type="button" data-action="copy-path" ` +
     `data-abs="${escapeHtml(String(abs ?? ''))}" data-rel="${escapeHtml(String(rel ?? ''))}">Copy</button>` +
     `</div>`
@@ -110,7 +110,7 @@ function entryRow(e) {
       `<span class="file-name">${escapeHtml(name)}</span>${size}</button>` +
       `<span class="file-ops">` +
       `<button class="btn btn-mini" type="button" data-action="files-diff" data-rel="${escapeHtml(rel)}">Diff</button>` +
-      `<button class="btn btn-mini" type="button" data-action="files-download" data-rel="${escapeHtml(rel)}">Get</button>` +
+      `<button class="btn btn-mini" type="button" data-action="files-download" data-rel="${escapeHtml(rel)}">Save</button>` +
       `</span></div>`;
   return open;
 }
@@ -127,7 +127,13 @@ export function renderFilesExplorer({ abs = '', dir = '.', entries = [], parent 
         `<span class="file-name">…</span></button>`;
   const list =
     !entries || entries.length === 0
-      ? `<section class="empty-state" aria-label="Empty directory"><p class="h-caption">Empty directory.</p></section>`
+      ? emptyState({
+          icon: 'folder',
+          title: 'Empty directory',
+          sub: 'Nothing here yet.',
+          label: 'Empty directory',
+          hero: true,
+        })
       : entries.map(entryRow).join('');
   const html =
     `<section aria-label="Files">` +
@@ -143,7 +149,12 @@ export function renderFilesExplorer({ abs = '', dir = '.', entries = [], parent 
 export function renderFilePreview({ path = '', abs = '', text = '', truncated = false, size = 0, binary = false } = {}) {
   let body;
   if (binary === true) {
-    body = `<div class="preview-binary">${badge('binary', 'binary')}</div>`;
+    body =
+      `<div class="preview-binary"><span class="empty-icon" aria-hidden="true">` +
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><rect x="5" y="7" width="14" height="12" rx="2"/><path d="M5 10.5h14"/></svg>` +
+      `</span><div class="h-sub">Binary file</div>` +
+      `<div class="h-caption">Preview is unavailable for this file type.</div>` +
+      `<div>${badge('binary', 'binary')}</div></div>`;
   } else {
     const head =
       `<pre class="mono preview-body">${escapeHtml(String(text ?? ''))}</pre>` +
@@ -170,9 +181,19 @@ export function renderTaskFiles(
     `<span class="status-hl">+${Number(total_added) || 0}</span> −${Number(total_removed) || 0}</div>`;
   let list;
   if (no_git === true) {
-    list = `<section class="empty-state" aria-label="No git data"><p class="h-caption">No git data for this task.</p></section>`;
+    list = emptyState({
+      icon: 'code',
+      title: 'No git data',
+      sub: 'This task has no version-control history.',
+      label: 'No git data for this task',
+    });
   } else if (!files || files.length === 0) {
-    list = `<section class="empty-state" aria-label="No changed files"><p class="h-caption">No changed files.</p></section>`;
+    list = emptyState({
+      icon: 'folder',
+      title: 'No changed files',
+      sub: 'Edits made by this task will show up here.',
+      label: 'No changed files',
+    });
   } else {
     list = files
       .map((f) => {
@@ -228,14 +249,21 @@ export function renderDiff(
     action = 'diff-more',
   } = {},
 ) {
-  const counts =
-    `<div class="h-caption diff-counts"><span class="status-hl">+${Number(added) || 0}</span> ` +
-    `−${Number(removed) || 0}</div>`;
   let body;
   if (binary === true) {
-    body = `<div class="preview-binary">${badge('binary', 'binary')}</div>`;
+    body =
+      `<div class="preview-binary"><span class="empty-icon" aria-hidden="true">` +
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><rect x="5" y="7" width="14" height="12" rx="2"/><path d="M5 10.5h14"/></svg>` +
+      `</span><div class="h-sub">Binary file</div>` +
+      `<div class="h-caption">Diff is unavailable for this file type.</div>` +
+      `<div>${badge('binary', 'binary')}</div></div>`;
   } else if (no_git === true || diff === '') {
-    body = `<section class="empty-state" aria-label="No diff"><p class="h-caption">No diff available.</p></section>`;
+    body = emptyState({
+      icon: 'code',
+      title: 'No diff available',
+      sub: no_git === true ? 'Git history is unavailable here.' : 'Nothing changed in this view.',
+      label: 'No diff',
+    });
   } else {
     const parsed = parseUnifiedDiff(String(diff ?? ''));
     const dropN = Number(dropped) || parsed.dropped || 0;
@@ -272,7 +300,6 @@ export function renderDiff(
     `<section aria-label="Diff">` +
     absBar(abs === '' ? String(path ?? '') : abs, abs === '' ? '' : String(rel ?? '')) +
     `<h2 class="h-caption section-header">${escapeHtml(String(path ?? ''))}</h2>` +
-    counts +
     body +
     `</section>`;
   return { html, float: '' };

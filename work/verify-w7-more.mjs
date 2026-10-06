@@ -133,6 +133,7 @@ g('C renderConfirm');
   assert(v.float === '', 'confirm: no floating bar');
   const empty = confirm.renderConfirm({ text: '  ' });
   assert(/data-action="draft-run"[^>]*disabled/.test(empty.html), 'empty prompt -> Run disabled');
+  assert(/\.btn:disabled/.test(appCss), 'disabled Run dims: .btn:disabled rule exists in app.css');
   const evil = confirm.renderConfirm({ text: '<script>alert(1)</script>' });
   assert(!evil.html.includes('<script>') && evil.html.includes('&lt;script&gt;'), 'prompt text is escaped (Edit preserves it safely)');
   const busy = confirm.renderConfirm({ text: 'x', busy: true });
@@ -239,6 +240,10 @@ g('H app routes + reset mechanism');
   assert(/renderMore\(/.test(appJs) && /void loadMore\(\)/.test(appJs), 'More route paints then loads once per visit');
   assert(/openConfirm\(\)/.test(appJs) && /new-task/.test(appJs), 'New task entry opens the confirm card');
   assert(/readConfirmText\(\)/.test(appJs) && /composerText/.test(appJs), 'Edit/Back preserves text via the composer buffer');
+  assert(
+    count(appJs, /state\.tab === 'home' && !state\.confirm/g) === 2,
+    'N1: both home repaints (current + recent pollers) are guarded while the confirm sheet is open',
+  );
   assert(/postDraft\(/.test(appJs) && /confirmDraft\(/.test(appJs), 'Run = POST draft then confirm -> task_id');
   assert(/validateDraft\(/.test(appJs), 'Run passes through the pure validateDraft gate');
   assert(/showConfirmDialog\('Reset session/.test(appJs), 'Reset asks showConfirm first');

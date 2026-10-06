@@ -4,9 +4,9 @@
  * Data shapes follow src/miniapp/api.ts taskView/recent.
  */
 
-import { escapeHtml, formatCost, formatElapsed } from './home.js';
+import { emptyState, escapeHtml, formatCost, formatElapsed } from './home.js';
 
-export { escapeHtml, formatCost, formatElapsed };
+export { emptyState, escapeHtml, formatCost, formatElapsed };
 
 function row(t) {
   return (
@@ -23,11 +23,13 @@ function row(t) {
 export function renderTasks({ tasks = [] } = {}) {
   if (!tasks || tasks.length === 0) {
     return {
-      html:
-        `<section class="empty-state" aria-label="No tasks yet">` +
-        `<div class="h-title">No tasks yet</div>` +
-        `<p class="h-caption">Finished and running tasks appear here.</p>` +
-        `</section>`,
+      html: emptyState({
+        icon: 'list',
+        title: 'No tasks yet',
+        sub: 'Finished and running tasks appear here.',
+        label: 'No tasks yet',
+        hero: true,
+      }),
       float: '',
     };
   }
@@ -62,11 +64,11 @@ export function renderTaskDetails(t = {}) {
   const html =
     `<section class="content-card task-details" aria-label="Task details">` +
     `<div class="h-sub">${escapeHtml(t.title ?? '')}</div>` +
-    `<div class="h-caption">status <span class="status-hl">${escapeHtml(t.status ?? '')}</span></div>` +
-    `<div class="h-caption">cost <span class="metric">${formatCost(t.cost_usd)}</span></div>` +
-    `<div class="h-caption">elapsed <span class="metric" data-elapsed-base="${Number(t.elapsed_s) || 0}">${formatElapsed(t.elapsed_s)}</span></div>` +
-    `<div class="detail-block" data-testid="skills-used"><span class="h-caption">skills</span><div>${skillsLine(t.skills_used)}</div></div>` +
-    `<div class="detail-block"><span class="h-caption">files</span><div>${filesLine(t.files_summary)}</div></div>` +
+    `<div class="ctx-row"><span class="h-caption">Status</span><span class="status-hl">${escapeHtml(t.status ?? '')}</span></div>` +
+    `<div class="ctx-row"><span class="h-caption">Cost</span><span class="metric ctx-val">${formatCost(t.cost_usd)}</span></div>` +
+    `<div class="ctx-row"><span class="h-caption">Elapsed</span><span class="metric ctx-val" data-elapsed-base="${Number(t.elapsed_s) || 0}">${formatElapsed(t.elapsed_s)}</span></div>` +
+    `<div class="detail-block" data-testid="skills-used"><span class="h-caption">Skills</span><div>${skillsLine(t.skills_used)}</div></div>` +
+    `<div class="detail-block"><span class="h-caption">Files</span><div>${filesLine(t.files_summary)}</div></div>` +
     `<div class="detail-block"><label class="h-caption" for="continue-text">Continue with instructions</label>` +
     `<input class="text-input" id="continue-text" data-continue-input="${id}" type="text" maxlength="4000" placeholder="What should change?">` +
     `</div>` +
