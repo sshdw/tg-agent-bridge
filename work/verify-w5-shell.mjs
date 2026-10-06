@@ -123,6 +123,19 @@ assert(tokens.includes('.glass-elevated { position: relative; }'), '.glass-eleva
 // (5) the 420 ms reveal still hangs off the allowlisted .app[data-ready="1"] prefix.
 assert(/\.app\[data-ready="1"\]\s+\.app-head/.test(appCss), 'reveal animates .app-head via the .app[data-ready="1"] prefix');
 assert(/miniapp-open 420ms/.test(appCss), '420 ms miniapp-open reveal preserved');
+// (6) FIX A regression guard: fill-mode must be `backwards` (releases the
+// transform when done, so .sheet-scrim stays viewport-fixed) — never `both`.
+assert(
+  /miniapp-open 420ms var\(--spring-open\) backwards/.test(appCss) &&
+    !/miniapp-open 420ms var\(--spring-open\) both/.test(appCss),
+  'reveal uses fill-mode backwards, not both (sheet scrim stays viewport-fixed)',
+);
+// (7) FIX B: the sheet glint is suppressed on the SOLID fallback branches.
+assert(
+  /\[data-flat="1"\] \.glass-elevated::after/.test(tokens) &&
+    /\[data-perf="lite"\] \.glass-elevated::after/.test(tokens),
+  'sheet glint hidden on [data-flat="1"] and [data-perf="lite"] solid fallbacks',
+);
 
 /* ---------------- AC4: autoPerf units ---------------- */
 g('AC4 autoPerf ladder');

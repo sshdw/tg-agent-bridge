@@ -42,7 +42,7 @@ body {
 .app[data-ready="1"] .app-head,
 .app[data-ready="1"] .screen {
   opacity: 1;
-  animation: miniapp-open 420ms var(--spring-open) both;
+  animation: miniapp-open 420ms var(--spring-open) backwards;
 }
 
 @keyframes miniapp-open {

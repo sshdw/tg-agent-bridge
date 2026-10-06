@@ -625,3 +625,16 @@ a {
     rgba(255, 255, 255, 0.00) 100%);
   pointer-events: none;
 }
+
+/* Glint fallback ladder. The frozen [data-flat="1"] and [data-perf="lite"]
+ * pseudo lists (lines ~459–464 / ~498–503) predate this sheet glint and turn
+ * the surface SOLID; without this the 1px .glass-elevated::after would survive
+ * as a stray white line on a solid card. Cover exactly the branches where the
+ * surface becomes SOLID, mirroring the frozen logic.
+ * Deliberately NOT [data-perf="reduced"]: that branch only cuts .glass-tex and
+ * KEEPS the nav/float glints, so the sheet keeps its glint there too — do not
+ * "fix" this by adding reduced. */
+:root[data-flat="1"] .glass-elevated::after,
+:root[data-perf="lite"] .glass-elevated::after { display: none; }
+@media (prefers-reduced-transparency: reduce) { .glass-elevated::after { display: none; } }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .glass-elevated::after { display: none; } }
